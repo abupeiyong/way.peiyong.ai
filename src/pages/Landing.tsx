@@ -4,7 +4,7 @@ export default function Landing({ nav, authed }: { nav: (to: string) => void; au
     <div className="landing">
       <div className="landing-top">
         <div className="row">
-          <span className="logo-mark">道</span>
+          <span className="logo-mark">歪</span>
           <span className="logo-name">Way</span>
         </div>
         <div className="links">

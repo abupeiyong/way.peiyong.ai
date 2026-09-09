@@ -86,7 +86,7 @@ export default function App() {
       <div className="shell">
         <aside className="sidebar">
           <a className="logo" href="/today" onClick={(e) => { e.preventDefault(); nav("/today"); }}>
-            <span className="logo-mark">道</span>
+            <span className="logo-mark">歪</span>
             <span className="logo-name">Way</span>
           </a>
           <nav className="nav">

@@ -31,7 +31,7 @@ export default function AuthPage({ mode, nav, onAuthed }: {
     <div className="auth-wrap">
       <div className="auth-box">
         <div className="auth-brand">
-          <span className="logo-mark">道</span>
+          <span className="logo-mark">歪</span>
           <h1>Way</h1>
           <p>Turn your direction into daily action.</p>
         </div>
