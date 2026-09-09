@@ -9,7 +9,7 @@
 ## 栈
 
 - 前端: Vite + React 18（无路由库，`src/api.ts` 里 30 行 pushState 路由），单文件设计系统 `src/styles.css`
-- UI: 画·书 (huashu) design — 与 english.peiyong.ai 同源（token 来自 `../english/public/styles.css`）：
+- UI: 画·书 (huashu) design — 与 english.peiyong.ai 同源（token 来自 `../english.peiyong.ai/public/styles.css`）：
   宣纸底纹 #f4eddc、朱砂印 #a8332a、楷体标题+EB Garamond 斜体英文副标、Ma Shan Zheng 品牌字、
   不规则圆角印章(logo/勾选框)、卡片右上角印泥点、格线稿纸 textarea(.ruled)
 - 后端: Hono on Cloudflare Workers（`worker/index.ts`），PBKDF2 密码 + D1 cookie session
