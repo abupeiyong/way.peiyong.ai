@@ -1,29 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { api, todayStr } from "../api.ts";
 import type { Goal, GuideMessage, GuideProposal } from "../../shared/types.ts";
+import { proposalLabel } from "../../shared/proposals.ts";
 import { useApp } from "../App.tsx";
 
-function proposalLabel(p: GuideProposal): JSX.Element {
-  if (p.kind === "create_goal") {
-    return <span className="p-what">New {p.level} goal: <strong>{p.title}</strong>{p.area ? ` · ${p.area}` : ""}{p.target_date ? ` · by ${p.target_date}` : ""}</span>;
-  }
-  if (p.kind === "create_task") {
-    return <span className="p-what">Task on {p.date}: <strong>{p.title}</strong>{p.start ? ` · ${p.start}` : ""}{p.estimate_min ? ` · ${p.estimate_min} min` : ""}</span>;
-  }
-  if (p.kind === "set_top_three") {
-    return <span className="p-what">Top three for {p.date}: <strong>{p.outcomes.join(" · ")}</strong></span>;
-  }
-  if (p.kind === "set_weekly_plan") {
-    return <span className="p-what">Week of {p.week_start}{p.theme ? <> · <strong>{p.theme}</strong></> : ""}: <strong>{(p.outcomes ?? []).join(" · ")}</strong></span>;
-  }
-  if (p.kind === "update_goal_progress") {
-    return <span className="p-what">Progress of <strong>{p.goal_title}</strong> → <strong>{p.progress}%</strong></span>;
-  }
-  if (p.kind === "create_review") {
-    const answered = Object.values(p.answers ?? {}).filter(Boolean).length;
-    return <span className="p-what">{p.period} review from {p.period_start}: <strong>{answered} answer{answered === 1 ? "" : "s"}</strong></span>;
-  }
-  return <span className="p-what">Unknown proposal</span>;
+function ProposalLabel({ p }: { p: GuideProposal }) {
+  return (
+    <span className="p-what">
+      {proposalLabel(p).map((part, i) => (typeof part === "string" ? part : <strong key={i}>{part.strong}</strong>))}
+    </span>
+  );
 }
 
 export default function Guide() {
@@ -108,7 +94,7 @@ export default function Guide() {
               const key = `${m.id}:${i}`;
               return (
                 <div className="proposal-card" key={key}>
-                  {proposalLabel(p)}
+                  <ProposalLabel p={p} />
                   {applied.has(key)
                     ? <span className="chip green">applied</span>
                     : <button className="btn small" onClick={() => apply(m.id, i, p)}>Approve</button>}
