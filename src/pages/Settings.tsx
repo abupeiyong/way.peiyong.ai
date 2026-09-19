@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.ts";
-import type { Area, SecuritySettings } from "../../shared/types.ts";
+import type { Area, SecuritySettings, TelegramPrefs, TelegramSettings } from "../../shared/types.ts";
 import { useApp } from "../App.tsx";
 import { Icon } from "../components/Icon.tsx";
 
@@ -17,11 +17,57 @@ export default function Settings() {
   const [confirmDisable, setConfirmDisable] = useState(false);
   const [securityError, setSecurityError] = useState("");
 
+  // null = not loaded (or unavailable): the Telegram card stays hidden.
+  const [telegram, setTelegram] = useState<TelegramSettings | null>(null);
+  const [tgDraft, setTgDraft] = useState<TelegramPrefs & { timezone: string }>();
+  const [tgNote, setTgNote] = useState("");
+  const [tgError, setTgError] = useState("");
+  const [confirmUnlink, setConfirmUnlink] = useState(false);
+
   const loadAreas = () => api.get<{ areas: Area[] }>("/api/goals").then((r) => setAreas(r.areas));
   useEffect(() => { loadAreas(); }, []);
   useEffect(() => {
     api.get<{ security: SecuritySettings }>("/api/security").then((r) => setSecurity(r.security)).catch(() => setSecurity(null));
   }, []);
+
+  const loadTelegram = () =>
+    api.get<{ telegram: TelegramSettings }>("/api/telegram")
+      .then((r) => {
+        setTelegram(r.telegram);
+        setTgDraft({ ...r.telegram.prefs, timezone: r.telegram.timezone ?? "" });
+      })
+      .catch(() => setTelegram(null));
+  useEffect(() => { loadTelegram(); }, []);
+
+  const telegramAction = async (note: string, action: () => Promise<unknown>) => {
+    setTgError("");
+    setTgNote("");
+    try {
+      await action();
+      setTgNote(note);
+      setTimeout(() => setTgNote(""), 1600);
+    } catch (err) {
+      setTgError(err instanceof Error ? err.message : "Could not save.");
+    }
+  };
+
+  const saveTelegram = () => telegramAction("已存", async () => {
+    if (!tgDraft) return;
+    const { timezone, ...prefs } = tgDraft;
+    await api.put("/api/telegram/prefs", { ...prefs, timezone: timezone || null });
+    await loadTelegram();
+  });
+
+  const sendTest = () => telegramAction("已发", async () => {
+    await api.post("/api/telegram/test");
+    await loadTelegram();
+  });
+
+  const unlinkTelegram = () => telegramAction("已断开", async () => {
+    setConfirmUnlink(false);
+    await api.del("/api/telegram");
+    await loadTelegram();
+  });
 
   const setPasswordLogin = async (disabled: boolean) => {
     setSecurityError("");
@@ -134,6 +180,97 @@ export default function Settings() {
         </div>
       </div>
 
+      {telegram && tgDraft && (
+        <div className="card">
+          <div className="card-label">
+            电报 <i>Telegram</i>
+            {!telegram.linked ? <span className="chip">未连接 · Not connected</span>
+              : telegram.disconnected ? <span className="chip red">已断开 · Disconnected</span>
+              : <span className="chip green">已连接 · Connected</span>}
+            {tgNote && <span className="chip green">{tgNote}</span>}
+          </div>
+          {!telegram.linked ? (
+            <p className="muted small">
+              {telegram.bot ? (
+                <>
+                  在 Telegram 打开 <a href={`https://t.me/${telegram.bot}`} target="_blank" rel="noreferrer">@{telegram.bot}</a> 连接你的账号。<br />
+                  Open <a href={`https://t.me/${telegram.bot}`} target="_blank" rel="noreferrer">@{telegram.bot}</a> in Telegram to connect your account.
+                </>
+              ) : (
+                <>Telegram 尚未配置。<br />Telegram is not configured on this server.</>
+              )}
+            </p>
+          ) : (
+            <div className="stack">
+              <div className="spread">
+                <span>{telegram.username ? `@${telegram.username}` : "Telegram account linked"}</span>
+                <div className="row">
+                  <button className="btn ghost small" onClick={sendTest}>Send me today's brief</button>
+                  {confirmUnlink ? (
+                    <>
+                      <button className="btn ghost small" onClick={() => setConfirmUnlink(false)}>Cancel</button>
+                      <button className="btn danger small" onClick={unlinkTelegram}>Disconnect</button>
+                    </>
+                  ) : (
+                    <button className="btn ghost small" onClick={() => setConfirmUnlink(true)}>Disconnect</button>
+                  )}
+                </div>
+              </div>
+              {telegram.disconnected && (
+                <p className="small" style={{ color: "var(--red)" }}>
+                  已断开 —— 机器人被屏蔽了，不再发送消息。在 Telegram 解除屏蔽后点「Send me today's brief」恢复。<br />
+                  Disconnected — the bot was blocked, so nothing is sent. Unblock it in Telegram, then send the brief to resume.
+                </p>
+              )}
+              <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-end" }}>
+                <div>
+                  <label className="field-label">晨报 Morning brief</label>
+                  <input className="input" type="time" value={tgDraft.morning_at ?? ""}
+                         onChange={(e) => setTgDraft({ ...tgDraft, morning_at: e.target.value || null })} />
+                </div>
+                <div>
+                  <label className="field-label">晚间复盘 Evening review</label>
+                  <input className="input" type="time" value={tgDraft.review_at ?? ""}
+                         onChange={(e) => setTgDraft({ ...tgDraft, review_at: e.target.value || null })} />
+                </div>
+              </div>
+              <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-end" }}>
+                <div>
+                  <label className="field-label">免打扰 Quiet from</label>
+                  <input className="input" type="time" value={tgDraft.quiet_from ?? ""}
+                         onChange={(e) => setTgDraft({ ...tgDraft, quiet_from: e.target.value || null })} />
+                </div>
+                <div>
+                  <label className="field-label">至 Until</label>
+                  <input className="input" type="time" value={tgDraft.quiet_to ?? ""}
+                         onChange={(e) => setTgDraft({ ...tgDraft, quiet_to: e.target.value || null })} />
+                </div>
+              </div>
+              <div>
+                <label className="field-label">时区 Time zone</label>
+                <select className="input" value={tgDraft.timezone}
+                        onChange={(e) => setTgDraft({ ...tgDraft, timezone: e.target.value })}>
+                  <option value="">UTC (default)</option>
+                  {timeZones(tgDraft.timezone).map((z) => <option key={z} value={z}>{z}</option>)}
+                </select>
+              </div>
+              <label className="row small" style={{ cursor: "pointer" }}>
+                <button type="button" className={`checkbox${tgDraft.nudges ? " checked" : ""}`} aria-label="Toggle nudges"
+                        onClick={() => setTgDraft({ ...tgDraft, nudges: tgDraft.nudges ? 0 : 1 })}>
+                  {tgDraft.nudges ? <Icon name="check" /> : null}
+                </button>
+                提醒 · Nudges during the day
+              </label>
+              <p className="muted mini">留空即关闭。Leave a time empty to turn it off.</p>
+              <div>
+                <button className="btn" onClick={saveTelegram}>Save Telegram settings</button>
+              </div>
+            </div>
+          )}
+          {tgError && <p className="small" style={{ color: "var(--red)", marginTop: 8 }}>{tgError}</p>}
+        </div>
+      )}
+
       {security && (
         <div className="card">
           <div className="card-label">
@@ -204,4 +341,10 @@ export default function Settings() {
       </p>
     </div>
   );
+}
+
+/** Every IANA zone the browser knows, plus `current` if it is not among them (and not empty). */
+function timeZones(current: string): string[] {
+  const zones = Intl.supportedValuesOf("timeZone");
+  return current && !zones.includes(current) ? [current, ...zones] : zones;
 }
