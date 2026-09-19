@@ -45,6 +45,27 @@ export interface TelegramSettings {
   prefs: TelegramPrefs;
 }
 
+/** POST /api/telegram/link/start. */
+export interface TelegramLinkStart {
+  /** The 32-hex nonce; poll GET /api/telegram/link/status?code=… with it. */
+  code: string;
+  /** https://t.me/<bot>?start=link_<code> — opens the bot on this device. */
+  url: string;
+  /** What the QR code encodes (the same deep link), for scanning with a phone. */
+  qr: string;
+  /** Seconds until the nonce stops working. */
+  expires_in: number;
+}
+
+/** GET /api/telegram/link/status. */
+export type TelegramLinkStatus =
+  | { state: "pending" }
+  | { state: "linked"; username: string | null }
+  /** The nonce was used, but that Telegram account is already linked to another Way account. */
+  | { state: "refused" }
+  /** Expired, replaced by a newer link, or not this user's nonce. */
+  | { state: "expired" };
+
 export interface Area {
   id: number;
   name: string;

@@ -703,6 +703,8 @@ textarea.ruled:focus { box-shadow: none; }
 .area-edit-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
 .area-edit-row input[type="color"] { width: 34px; height: 30px; border: 1px solid var(--line); border-radius: 4px; background: none; cursor: pointer; padding: 1px; }
 .area-edit-row .grow { flex: 1; }
+.tg-link { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.tg-link .qr { flex: none; border: 1px solid var(--line); border-radius: 4px; }
 
 /* misc */
 .row { display: flex; align-items: center; gap: 10px; }
