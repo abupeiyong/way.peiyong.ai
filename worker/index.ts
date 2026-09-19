@@ -21,7 +21,7 @@ import { claimUpdate, handleUpdate, isUpdate, secretTokenOk, SECRET_HEADER } fro
 import { BadInput, coerceFields, dateOrNull, idOrNull, int, nonEmptyText, oneOf, text, type FieldSpecs } from "./validate.ts";
 import type {
   GoalLevel, GoalStatus, GoalType, GuideProposal, Priority, ReviewPeriod, SecuritySettings,
-  TelegramLinkStart, TelegramPrefs, TelegramSettings,
+  TelegramLinkStart, TelegramPrefs, TelegramSettings, User,
 } from "../shared/types.ts";
 
 export interface Env {
@@ -253,9 +253,14 @@ app.use("/api/*", async (c, next) => {
 });
 
 app.get("/api/me", async (c) => {
-  const user = await c.env.DB.prepare("SELECT id, email, name, direction FROM users WHERE id = ?")
+  // SELECT * so /api/me keeps working before migration 0002 adds timezone / password_login_disabled.
+  const row = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?")
     .bind(c.get("userId"))
-    .first();
+    .first<{ id: number; email: string; name: string; direction: string; timezone?: string | null; password_login_disabled?: number }>();
+  const user: User | null = row && {
+    id: row.id, email: row.email, name: row.name, direction: row.direction,
+    timezone: row.timezone ?? null, password_login_disabled: !!row.password_login_disabled,
+  };
   return c.json({ user });
 });
 
