@@ -370,6 +370,11 @@ textarea.input { resize: vertical; min-height: 64px; }
 }
 .auth-note { color: var(--ink-soft); font-size: 0.9rem; line-height: 1.6; }
 .auth-code { font-size: 1.3rem; letter-spacing: 0.3em; text-align: center; }
+.auth-telegram { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.auth-or { display: flex; align-items: center; gap: 10px; width: 100%; font-family: var(--kai); font-size: 0.84rem; color: var(--ink-faint); }
+.auth-or::before, .auth-or::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
+.auth-or i { font-family: var(--serif-en); }
+.auth-telegram-widget { min-height: 40px; }
 .auth-switch { text-align: center; font-size: 0.84rem; color: var(--ink-faint); }
 .auth-switch a { color: var(--red-deep); }
 .auth-alt { text-align: center; color: var(--ink-faint); font-size: 0.88rem; margin-top: 14px; }
