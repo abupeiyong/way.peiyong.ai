@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import { hashPassword, verifyPassword, newSessionToken, sessionCookie, SESSION_COOKIE, SESSION_DAYS } from "./auth.ts";
 import { chatComplete, extractProposals, type ChatMsg } from "./guide.ts";
-import type { GuideProposal } from "../shared/types.ts";
+import type { GoalLevel, GuideProposal, ReviewPeriod } from "../shared/types.ts";
 
 export interface Env {
   DB: D1Database;
@@ -27,6 +27,9 @@ const DEFAULT_AREAS: [string, string][] = [
   ["Lifestyle", "#c0a161"],
   ["Contribution", "#699099"],
 ];
+
+const GOAL_LEVELS: GoalLevel[] = ["lifetime", "year", "quarter", "month", "week"];
+const REVIEW_PERIODS: ReviewPeriod[] = ["daily", "weekly", "monthly", "quarterly", "yearly"];
 
 // ---------- helpers ----------
 
@@ -671,8 +674,12 @@ app.post("/api/guide/apply", async (c) => {
   const userId = c.get("userId");
   const { proposal } = await c.req.json<{ proposal: GuideProposal }>();
   const db = c.env.DB;
+  const isDate = (s: unknown) => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
 
   if (proposal.kind === "create_goal") {
+    if (proposal.level !== undefined && !GOAL_LEVELS.includes(proposal.level)) {
+      return c.json({ error: `unknown goal level "${proposal.level}"` }, 400);
+    }
     let areaId: number | null = null;
     if (proposal.area) {
       const a = await db.prepare("SELECT id FROM areas WHERE user_id = ? AND name = ? AND archived = 0").bind(userId, proposal.area).first<{ id: number }>();
@@ -717,6 +724,49 @@ app.post("/api/guide/apply", async (c) => {
        ON CONFLICT (user_id, date) DO UPDATE SET top1 = excluded.top1, top2 = excluded.top2, top3 = excluded.top3`
     ).bind(userId, date, t1, t2, t3).run();
     return c.json({ ok: true, applied: "top_three" });
+  }
+
+  if (proposal.kind === "set_weekly_plan") {
+    if (!isDate(proposal.week_start)) return c.json({ error: "bad week_start date" }, 400);
+    if (!Array.isArray(proposal.outcomes)) return c.json({ error: "outcomes must be a list" }, 400);
+    const weekStart = weekStartOf(proposal.week_start);
+    const [o1, o2, o3] = [...proposal.outcomes, "", "", ""].slice(0, 3).map(String);
+    // Commitments and risks are left as the user wrote them.
+    await db.prepare(
+      `INSERT INTO weekly_plans (user_id, week_start, theme, outcome1, outcome2, outcome3) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (user_id, week_start) DO UPDATE SET
+         theme = excluded.theme, outcome1 = excluded.outcome1, outcome2 = excluded.outcome2, outcome3 = excluded.outcome3`
+    ).bind(userId, weekStart, String(proposal.theme ?? ""), o1, o2, o3).run();
+    return c.json({ ok: true, applied: "weekly_plan" });
+  }
+
+  if (proposal.kind === "update_goal_progress") {
+    const progress = Number(proposal.progress);
+    if (!Number.isFinite(progress) || progress < 0 || progress > 100) {
+      return c.json({ error: "progress must be a number from 0 to 100" }, 400);
+    }
+    const g = typeof proposal.goal_title === "string"
+      ? await db.prepare("SELECT id FROM goals WHERE user_id = ? AND title = ?").bind(userId, proposal.goal_title).first<{ id: number }>()
+      : null;
+    if (!g) return c.json({ error: `no goal titled "${proposal.goal_title}"` }, 404);
+    await db.prepare("UPDATE goals SET progress = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?")
+      .bind(Math.round(progress), g.id, userId).run();
+    return c.json({ ok: true, applied: "goal_progress" });
+  }
+
+  if (proposal.kind === "create_review") {
+    if (!REVIEW_PERIODS.includes(proposal.period)) return c.json({ error: `unknown review period "${proposal.period}"` }, 400);
+    if (!isDate(proposal.period_start)) return c.json({ error: "bad period_start date" }, 400);
+    const answers = proposal.answers;
+    if (!answers || typeof answers !== "object" || Array.isArray(answers)) return c.json({ error: "answers must be an object" }, 400);
+    const periodStart = reviewPeriodStart(proposal.period, proposal.period_start);
+    // Merge into an existing review so answers the user already wrote survive.
+    await db.prepare(
+      `INSERT INTO reviews (user_id, period, period_start, answers) VALUES (?, ?, ?, ?)
+       ON CONFLICT (user_id, period, period_start) DO UPDATE SET answers = json_patch(reviews.answers, excluded.answers)`
+    ).bind(userId, proposal.period, periodStart,
+           JSON.stringify(Object.fromEntries(Object.entries(answers).map(([q, a]) => [q, String(a ?? "")])))).run();
+    return c.json({ ok: true, applied: "review" });
   }
 
   return c.json({ error: "unknown proposal kind" }, 400);

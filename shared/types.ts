@@ -110,7 +110,10 @@ export interface Review {
 export type GuideProposal =
   | { kind: "create_goal"; title: string; level: GoalLevel; area?: string; parent_title?: string; target_date?: string; success_criteria?: string; description?: string }
   | { kind: "create_task"; title: string; date: string; estimate_min?: number; start?: string; goal_title?: string }
-  | { kind: "set_top_three"; date: string; outcomes: string[] };
+  | { kind: "set_top_three"; date: string; outcomes: string[] }
+  | { kind: "set_weekly_plan"; week_start: string; theme?: string; outcomes: string[] }
+  | { kind: "update_goal_progress"; goal_title: string; progress: number }
+  | { kind: "create_review"; period: ReviewPeriod; period_start: string; answers: Record<string, string> };
 
 export interface GuideMessage {
   id: number;

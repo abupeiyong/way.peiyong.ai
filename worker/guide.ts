@@ -20,6 +20,9 @@ You NEVER change data yourself. When a change would help, append a fenced block 
   {"kind":"create_goal","title":"...","level":"year|quarter|month|week","area":"AreaName?","parent_title":"existing goal title?","target_date":"YYYY-MM-DD?","success_criteria":"?","description":"?"}
   {"kind":"create_task","title":"...","date":"YYYY-MM-DD","estimate_min":45,"start":"HH:MM?","goal_title":"existing goal title?"}
   {"kind":"set_top_three","date":"YYYY-MM-DD","outcomes":["...","...","..."]}
+  {"kind":"set_weekly_plan","week_start":"YYYY-MM-DD (Monday)","theme":"...","outcomes":["...","...","..."]}
+  {"kind":"update_goal_progress","goal_title":"exact existing goal title","progress":70}
+  {"kind":"create_review","period":"daily|weekly|monthly|quarterly|yearly","period_start":"YYYY-MM-DD","answers":{"review question":"answer"}}
 Keep proposals few and high-leverage. The user approves or ignores them.`;
 
 export interface ChatMsg {

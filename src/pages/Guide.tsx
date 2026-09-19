@@ -10,7 +10,20 @@ function proposalLabel(p: GuideProposal): JSX.Element {
   if (p.kind === "create_task") {
     return <span className="p-what">Task on {p.date}: <strong>{p.title}</strong>{p.start ? ` · ${p.start}` : ""}{p.estimate_min ? ` · ${p.estimate_min} min` : ""}</span>;
   }
-  return <span className="p-what">Top three for {p.date}: <strong>{p.outcomes.join(" · ")}</strong></span>;
+  if (p.kind === "set_top_three") {
+    return <span className="p-what">Top three for {p.date}: <strong>{p.outcomes.join(" · ")}</strong></span>;
+  }
+  if (p.kind === "set_weekly_plan") {
+    return <span className="p-what">Week of {p.week_start}{p.theme ? <> · <strong>{p.theme}</strong></> : ""}: <strong>{(p.outcomes ?? []).join(" · ")}</strong></span>;
+  }
+  if (p.kind === "update_goal_progress") {
+    return <span className="p-what">Progress of <strong>{p.goal_title}</strong> → <strong>{p.progress}%</strong></span>;
+  }
+  if (p.kind === "create_review") {
+    const answered = Object.values(p.answers ?? {}).filter(Boolean).length;
+    return <span className="p-what">{p.period} review from {p.period_start}: <strong>{answered} answer{answered === 1 ? "" : "s"}</strong></span>;
+  }
+  return <span className="p-what">Unknown proposal</span>;
 }
 
 export default function Guide() {
@@ -49,8 +62,13 @@ export default function Guide() {
   };
 
   const apply = async (msgId: number, idx: number, p: GuideProposal) => {
-    await api.post("/api/guide/apply", { proposal: p });
-    setApplied((prev) => new Set(prev).add(`${msgId}:${idx}`));
+    setError("");
+    try {
+      await api.post("/api/guide/apply", { proposal: p });
+      setApplied((prev) => new Set(prev).add(`${msgId}:${idx}`));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not apply this proposal.");
+    }
   };
 
   return (
