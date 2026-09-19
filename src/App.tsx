@@ -110,8 +110,44 @@ export default function App() {
             </a>
           </div>
         </aside>
-        <main className="main">{page}</main>
+        <main className="main">
+          <TimezoneOffer user={user} refreshUser={refreshUser} />
+          {page}
+        </main>
       </div>
     </AppCtx.Provider>
+  );
+}
+
+const TZ_DISMISSED_KEY = "way.tz-offer-dismissed";
+
+/** While the account is still on UTC, offer the browser's zone once; "Not now" is remembered per zone. */
+function TimezoneOffer({ user, refreshUser }: { user: User; refreshUser: () => Promise<void> }) {
+  const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const [hidden, setHidden] = useState(() => localStorage.getItem(TZ_DISMISSED_KEY) === browserZone);
+  if (hidden || !browserZone || browserZone === "UTC" || browserZone === "Etc/UTC") return null;
+  if (user.timezone && user.timezone !== "UTC") return null;
+
+  const accept = async () => {
+    setHidden(true);
+    try {
+      await api.put("/api/me", { timezone: browserZone });
+      await refreshUser();
+    } catch { /* still on UTC; the zone can be set in Settings */ }
+  };
+  const dismiss = () => {
+    localStorage.setItem(TZ_DISMISSED_KEY, browserZone);
+    setHidden(true);
+  };
+
+  return (
+    <div className="carry-banner">
+      <strong>时区 · Your account uses UTC.</strong>
+      <span>This browser is on {browserZone}. Use it for “today”, reviews and reminders?</span>
+      <span className="actions">
+        <button onClick={accept}>Use {browserZone}</button>
+        <button onClick={dismiss}>Not now</button>
+      </span>
+    </div>
   );
 }

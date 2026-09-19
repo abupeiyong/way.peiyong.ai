@@ -11,11 +11,12 @@ import { updateDay } from "./days.ts";
 import { upsertReview, type ReviewInput } from "./reviews.ts";
 import { issueOtp, redeemOtp, OTP_TTL_SECONDS } from "./telegram/otp.ts";
 import { sendMorning } from "./telegram/compose.ts";
-import { updateTelegramPrefs } from "./telegram/prefs.ts";
+import { timezoneOrNull, updateTelegramPrefs } from "./telegram/prefs.ts";
 import { isLinkNonce, linkStatus, linkUrl, startLink, LINK_TTL_SECONDS } from "./telegram/link.ts";
 import { runSchedules, isDisconnected, localDate, DISCONNECTED_UNTIL } from "./telegram/schedule.ts";
 import { BOT_COMMANDS, sendReply, TelegramApiError, TelegramBot } from "./telegram/api.ts";
 import { d1StateStore } from "./telegram/state.ts";
+import { userToday } from "./telegram/time.ts";
 import { verifyWidgetLogin } from "./telegram/widget.ts";
 import { claimUpdate, handleUpdate, isUpdate, secretTokenOk, SECRET_HEADER } from "./telegram/webhook.ts";
 import { BadInput, coerceFields, dateOrNull, idOrNull, int, nonEmptyText, oneOf, text, type FieldSpecs } from "./validate.ts";
@@ -64,6 +65,12 @@ const REVIEW_PERIODS: ReviewPeriod[] = ["daily", "weekly", "monthly", "quarterly
 
 function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
+}
+
+/** Today in the user's timezone (users.timezone; NULL = UTC). SELECT * keeps this working before migration 0002. */
+async function todayFor(db: D1Database, userId: number): Promise<string> {
+  const row = await db.prepare("SELECT * FROM users WHERE id = ?").bind(userId).first<{ timezone?: string | null }>();
+  return userToday(row?.timezone);
 }
 
 function assertDate(s: unknown): string {
@@ -265,11 +272,16 @@ app.get("/api/me", async (c) => {
 });
 
 app.put("/api/me", async (c) => {
-  const { name, direction } = await c.req.json<{ name?: string; direction?: string }>();
+  const b = await c.req.json<{ name?: string; direction?: string; timezone?: unknown }>();
+  const { name, direction } = b;
+  // Validated before anything is written; null or "" = UTC.
+  const timezone = "timezone" in b ? timezoneOrNull(b.timezone) : undefined;
   if (name !== undefined)
     await c.env.DB.prepare("UPDATE users SET name = ? WHERE id = ?").bind(name.trim(), c.get("userId")).run();
   if (direction !== undefined)
     await c.env.DB.prepare("UPDATE users SET direction = ? WHERE id = ?").bind(direction.trim(), c.get("userId")).run();
+  if (timezone !== undefined)
+    await c.env.DB.prepare("UPDATE users SET timezone = ? WHERE id = ?").bind(timezone, c.get("userId")).run();
   return c.json({ ok: true });
 });
 
@@ -748,7 +760,7 @@ function reviewPeriodEnd(period: string, startStr: string): string {
 app.get("/api/reviews", async (c) => {
   const userId = c.get("userId");
   const period = c.req.query("period") ?? "weekly";
-  const today = isoDate(new Date());
+  const today = await todayFor(c.env.DB, userId);
   const start = reviewPeriodStart(period, today);
   const end = reviewPeriodEnd(period, start);
 
@@ -783,7 +795,7 @@ app.put("/api/reviews", async (c) => {
 
 app.get("/api/insights", async (c) => {
   const userId = c.get("userId");
-  const today = isoDate(new Date());
+  const today = await todayFor(c.env.DB, userId);
   const d28 = addDays(today, -28);
   const d14 = addDays(today, -14);
 

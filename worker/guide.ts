@@ -3,6 +3,7 @@
 // that the client renders as approve-able cards; nothing changes without approval.
 
 import type { GuideProposal } from "../shared/types.ts";
+import { userToday } from "./telegram/time.ts";
 
 export interface GuideEnv {
   AI?: Ai;
@@ -74,7 +75,7 @@ export function extractProposals(reply: string): { text: string; proposals: Guid
 
 // ---------- one Guide turn, shared by POST /api/guide/chat and the Telegram bot ----------
 
-/** Monday of the week containing date (UTC, like the rest of the server's date math). */
+/** Monday of the week containing date (plain calendar math on YYYY-MM-DD). */
 function weekStartOf(dateStr: string): string {
   const d = new Date(dateStr + "T00:00:00Z");
   d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
@@ -83,8 +84,10 @@ function weekStartOf(dateStr: string): string {
 
 /** The planning state the Guide sees, rebuilt for every message. */
 export async function guideContext(db: D1Database, userId: number): Promise<string> {
-  const today = new Date().toISOString().slice(0, 10);
-  const user = await db.prepare("SELECT name, direction FROM users WHERE id = ?").bind(userId).first<{ name: string; direction: string }>();
+  // SELECT * keeps this working before migration 0002 adds users.timezone.
+  const user = await db.prepare("SELECT * FROM users WHERE id = ?").bind(userId)
+    .first<{ name: string; direction: string; timezone?: string | null }>();
+  const today = userToday(user?.timezone);
   const { results: areas } = await db.prepare("SELECT name, satisfaction FROM areas WHERE user_id = ? AND archived = 0 ORDER BY sort").bind(userId).all<{ name: string; satisfaction: number | null }>();
   const { results: goals } = await db.prepare(
     `SELECT g.title, g.level, g.status, g.progress, g.target_date, a.name AS area
