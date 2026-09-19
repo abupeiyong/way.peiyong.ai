@@ -3,6 +3,8 @@ import { getCookie } from "hono/cookie";
 import { hashPassword, verifyPassword, newSessionToken, sessionCookie, SESSION_COOKIE, SESSION_DAYS } from "./auth.ts";
 import { chatComplete, extractProposals, type ChatMsg } from "./guide.ts";
 import { carryOver, deleteTask, updateTask } from "./tasks.ts";
+import { updateDay } from "./days.ts";
+import { upsertReview, type ReviewInput } from "./reviews.ts";
 import type { GoalLevel, GuideProposal, ReviewPeriod } from "../shared/types.ts";
 
 export interface Env {
@@ -223,19 +225,10 @@ app.get("/api/day", async (c) => {
   return c.json({ day: { ...day, date }, tasks: tasks.results, inbox: inbox.results, carryCount: carry?.n ?? 0, goals: goals.results });
 });
 
-const DAY_FIELDS = ["intention", "reflection", "mood", "energy", "focus", "satisfaction",
-  "top1", "top1_done", "top2", "top2_done", "top3", "top3_done"] as const;
-
 app.put("/api/day/:date", async (c) => {
   const userId = c.get("userId");
   const date = assertDate(c.req.param("date"));
-  const body = await c.req.json<Record<string, unknown>>();
-  await c.env.DB.prepare("INSERT OR IGNORE INTO days (user_id, date) VALUES (?, ?)").bind(userId, date).run();
-  for (const f of DAY_FIELDS) {
-    if (f in body) {
-      await c.env.DB.prepare(`UPDATE days SET ${f} = ? WHERE user_id = ? AND date = ?`).bind(body[f], userId, date).run();
-    }
-  }
+  await updateDay(c.env.DB, userId, date, await c.req.json<Record<string, unknown>>());
   return c.json({ ok: true });
 });
 
@@ -514,17 +507,9 @@ app.get("/api/reviews", async (c) => {
 
 app.put("/api/reviews", async (c) => {
   const userId = c.get("userId");
-  const b = await c.req.json<{ period: string; period_start: string; answers: Record<string, string>;
-    mood?: number; energy?: number; focus?: number; satisfaction?: number }>();
+  const b = await c.req.json<ReviewInput>();
   assertDate(b.period_start);
-  await c.env.DB.prepare(
-    `INSERT INTO reviews (user_id, period, period_start, answers, mood, energy, focus, satisfaction)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT (user_id, period, period_start) DO UPDATE SET
-       answers = excluded.answers, mood = excluded.mood, energy = excluded.energy,
-       focus = excluded.focus, satisfaction = excluded.satisfaction`
-  ).bind(userId, b.period, b.period_start, JSON.stringify(b.answers ?? {}),
-         b.mood ?? null, b.energy ?? null, b.focus ?? null, b.satisfaction ?? null).run();
+  await upsertReview(c.env.DB, userId, b);
   return c.json({ ok: true });
 });
 
