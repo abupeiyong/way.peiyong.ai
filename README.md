@@ -42,5 +42,11 @@ npx wrangler secret put OPENAI_API_KEY --name way   # 可选,升级 Guide 模型
   心情能量趋势、计划 vs 实际、目标进度
 - Guide: 上下文注入(方向/areas/目标/今日/周计划)对话，quick actions,目标分解按钮,
   proposals 审批(create_goal / create_task / set_top_three)
-- Settings: 资料、Direction、life areas 编辑(颜色/满意度/归档/新增)、退出登录
+- Settings: 资料、时区、Direction、life areas 编辑(颜色/满意度/归档/新增)、Telegram 连接与各提醒时间、
+  安全(关闭密码登录)、退出登录
+- Telegram（共享 bot，`docs/PRD-telegram.md`）: 网页扫码/深链绑定；Login Widget / 6 位验证码 / 深链确认三种登录；
+  每天晨报+三件事一条消息、21:30 复盘状态机、周一周计划、周日周复盘、中午提醒、时间块提醒、月初领域打分；
+  /today /plan /task(明天 … @目标 #30m !must) /done /inbox /week /goals /review /note /guide /find /timezone /settings /mute /unlink；
+  随手发消息进 Inbox（转发保留来源、语音 whisper 转写、inline 模式）；道引对话与提案一键采用；纯 Telegram 注册；
+  投递/回复率统计（Settings 卡片）
 
