@@ -71,3 +71,69 @@ export function extractProposals(reply: string): { text: string; proposals: Guid
     return { text: reply.trim(), proposals: [] };
   }
 }
+
+// ---------- one Guide turn, shared by POST /api/guide/chat and the Telegram bot ----------
+
+/** Monday of the week containing date (UTC, like the rest of the server's date math). */
+function weekStartOf(dateStr: string): string {
+  const d = new Date(dateStr + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+  return d.toISOString().slice(0, 10);
+}
+
+/** The planning state the Guide sees, rebuilt for every message. */
+export async function guideContext(db: D1Database, userId: number): Promise<string> {
+  const today = new Date().toISOString().slice(0, 10);
+  const user = await db.prepare("SELECT name, direction FROM users WHERE id = ?").bind(userId).first<{ name: string; direction: string }>();
+  const { results: areas } = await db.prepare("SELECT name, satisfaction FROM areas WHERE user_id = ? AND archived = 0 ORDER BY sort").bind(userId).all<{ name: string; satisfaction: number | null }>();
+  const { results: goals } = await db.prepare(
+    `SELECT g.title, g.level, g.status, g.progress, g.target_date, a.name AS area
+     FROM goals g LEFT JOIN areas a ON a.id = g.area_id
+     WHERE g.user_id = ? AND g.status IN ('active','at_risk') ORDER BY g.level, g.id`
+  ).bind(userId).all<Record<string, unknown>>();
+  const { results: tasks } = await db.prepare(
+    "SELECT title, done, start_min, estimate_min FROM tasks WHERE user_id = ? AND date = ? AND inbox = 0 AND dropped = 0"
+  ).bind(userId, today).all<Record<string, unknown>>();
+  const day = await db.prepare("SELECT intention, top1, top2, top3 FROM days WHERE user_id = ? AND date = ?")
+    .bind(userId, today).first<Record<string, string>>();
+  const plan = await db.prepare("SELECT theme, outcome1, outcome2, outcome3 FROM weekly_plans WHERE user_id = ? AND week_start = ?")
+    .bind(userId, weekStartOf(today)).first<Record<string, string>>();
+
+  const lines = [
+    `Today: ${today}`,
+    `User: ${user?.name ?? ""}`,
+    `Direction: ${user?.direction || "(not set)"}`,
+    `Life areas: ${areas.map((a) => a.name + (a.satisfaction ? ` (${a.satisfaction}/10)` : "")).join(", ")}`,
+    `Active goals:`,
+    ...goals.map((g) => `  - [${g.level}] ${g.title} (${g.progress}%${g.target_date ? `, due ${g.target_date}` : ""}${g.area ? `, ${g.area}` : ""})`),
+    `This week's plan: ${plan ? `${plan.theme || "(no theme)"} — ${[plan.outcome1, plan.outcome2, plan.outcome3].filter(Boolean).join("; ")}` : "(none)"}`,
+    `Today's intention: ${day?.intention || "(none)"}`,
+    `Today's top three: ${day ? [day.top1, day.top2, day.top3].filter(Boolean).join("; ") || "(empty)" : "(empty)"}`,
+    `Today's tasks: ${tasks.length ? tasks.map((t) => `${t.title}${t.done ? " ✓" : ""}`).join("; ") : "(none)"}`,
+  ];
+  return lines.join("\n");
+}
+
+/**
+ * One Guide turn: store the user's message, replay the last 12 with fresh context, store the reply.
+ * Throws when the model is unavailable (the user's message stays stored, as before).
+ */
+export async function guideChat(
+  db: D1Database, env: GuideEnv, userId: number, message: string
+): Promise<{ id: number; text: string; proposals: GuideProposal[] }> {
+  await db.prepare("INSERT INTO guide_messages (user_id, role, content) VALUES (?, 'user', ?)").bind(userId, message.trim()).run();
+
+  const { results: recent } = await db.prepare(
+    "SELECT role, content FROM guide_messages WHERE user_id = ? ORDER BY id DESC LIMIT 12"
+  ).bind(userId).all<{ role: "user" | "assistant"; content: string }>();
+  const history: ChatMsg[] = recent.reverse().map((m) => ({ role: m.role, content: m.content }));
+
+  const reply = await chatComplete(env, await guideContext(db, userId), history);
+  const { text, proposals } = extractProposals(reply);
+
+  const saved = await db.prepare(
+    "INSERT INTO guide_messages (user_id, role, content, proposals) VALUES (?, 'assistant', ?, ?) RETURNING id"
+  ).bind(userId, text, proposals.length ? JSON.stringify(proposals) : null).first<{ id: number }>();
+  if (!saved) throw new Error("could not save the Guide reply");
+  return { id: saved.id, text, proposals };
+}

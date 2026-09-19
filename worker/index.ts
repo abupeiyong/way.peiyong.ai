@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import { hashPassword, verifyPassword, newSessionToken, sessionCookie, SESSION_COOKIE, SESSION_DAYS } from "./auth.ts";
-import { chatComplete, extractProposals, type ChatMsg } from "./guide.ts";
+import { guideChat } from "./guide.ts";
 import { carryOver, deleteTask, updateTask } from "./tasks.ts";
 import { updateDay } from "./days.ts";
 import { upsertReview, type ReviewInput } from "./reviews.ts";
@@ -568,38 +568,6 @@ app.get("/api/insights", async (c) => {
 
 // ---------- guide ----------
 
-async function guideContext(db: D1Database, userId: number): Promise<string> {
-  const today = isoDate(new Date());
-  const user = await db.prepare("SELECT name, direction FROM users WHERE id = ?").bind(userId).first<{ name: string; direction: string }>();
-  const { results: areas } = await db.prepare("SELECT name, satisfaction FROM areas WHERE user_id = ? AND archived = 0 ORDER BY sort").bind(userId).all<{ name: string; satisfaction: number | null }>();
-  const { results: goals } = await db.prepare(
-    `SELECT g.title, g.level, g.status, g.progress, g.target_date, a.name AS area
-     FROM goals g LEFT JOIN areas a ON a.id = g.area_id
-     WHERE g.user_id = ? AND g.status IN ('active','at_risk') ORDER BY g.level, g.id`
-  ).bind(userId).all<Record<string, unknown>>();
-  const { results: tasks } = await db.prepare(
-    "SELECT title, done, start_min, estimate_min FROM tasks WHERE user_id = ? AND date = ? AND inbox = 0 AND dropped = 0"
-  ).bind(userId, today).all<Record<string, unknown>>();
-  const day = await db.prepare("SELECT intention, top1, top2, top3 FROM days WHERE user_id = ? AND date = ?")
-    .bind(userId, today).first<Record<string, string>>();
-  const plan = await db.prepare("SELECT theme, outcome1, outcome2, outcome3 FROM weekly_plans WHERE user_id = ? AND week_start = ?")
-    .bind(userId, weekStartOf(today)).first<Record<string, string>>();
-
-  const lines = [
-    `Today: ${today}`,
-    `User: ${user?.name ?? ""}`,
-    `Direction: ${user?.direction || "(not set)"}`,
-    `Life areas: ${areas.map((a) => a.name + (a.satisfaction ? ` (${a.satisfaction}/10)` : "")).join(", ")}`,
-    `Active goals:`,
-    ...goals.map((g) => `  - [${g.level}] ${g.title} (${g.progress}%${g.target_date ? `, due ${g.target_date}` : ""}${g.area ? `, ${g.area}` : ""})`),
-    `This week's plan: ${plan ? `${plan.theme || "(no theme)"} — ${[plan.outcome1, plan.outcome2, plan.outcome3].filter(Boolean).join("; ")}` : "(none)"}`,
-    `Today's intention: ${day?.intention || "(none)"}`,
-    `Today's top three: ${day ? [day.top1, day.top2, day.top3].filter(Boolean).join("; ") || "(empty)" : "(empty)"}`,
-    `Today's tasks: ${tasks.length ? tasks.map((t) => `${t.title}${t.done ? " ✓" : ""}`).join("; ") : "(none)"}`,
-  ];
-  return lines.join("\n");
-}
-
 app.get("/api/guide", async (c) => {
   const { results } = await c.env.DB.prepare(
     "SELECT * FROM guide_messages WHERE user_id = ? ORDER BY id DESC LIMIT 40"
@@ -613,27 +581,12 @@ app.post("/api/guide/chat", async (c) => {
   const { message } = await c.req.json<{ message: string }>();
   if (!message?.trim()) return c.json({ error: "empty message" }, 400);
 
-  await c.env.DB.prepare("INSERT INTO guide_messages (user_id, role, content) VALUES (?, 'user', ?)").bind(userId, message.trim()).run();
-
-  const { results: recent } = await c.env.DB.prepare(
-    "SELECT role, content FROM guide_messages WHERE user_id = ? ORDER BY id DESC LIMIT 12"
-  ).bind(userId).all<{ role: "user" | "assistant"; content: string }>();
-  const history: ChatMsg[] = recent.reverse().map((m) => ({ role: m.role, content: m.content }));
-
-  const context = await guideContext(c.env.DB, userId);
-  let reply: string;
   try {
-    reply = await chatComplete(c.env, context, history);
+    const { id, text, proposals } = await guideChat(c.env.DB, c.env, userId, message);
+    return c.json({ message: { id, role: "assistant", content: text, proposals: proposals.length ? proposals : null } });
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : "Guide is unavailable right now." }, 502);
   }
-  const { text, proposals } = extractProposals(reply);
-
-  const saved = await c.env.DB.prepare(
-    "INSERT INTO guide_messages (user_id, role, content, proposals) VALUES (?, 'assistant', ?, ?) RETURNING id, created_at"
-  ).bind(userId, text, proposals.length ? JSON.stringify(proposals) : null).first();
-
-  return c.json({ message: { id: (saved as { id: number }).id, role: "assistant", content: text, proposals: proposals.length ? proposals : null } });
 });
 
 app.post("/api/guide/apply", async (c) => {

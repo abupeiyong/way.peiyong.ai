@@ -5,7 +5,9 @@
 
 import { carryOver, deleteTask, updateTask } from "../tasks.ts";
 import { REVIEW_QUESTIONS } from "../../shared/reviews.ts";
+import type { GuideEnv } from "../guide.ts";
 import { rateDay, reviewFocus, reviewNext, reviewResume, reviewSkip } from "./review.ts";
+import { proposalAnswer, topThreeButton } from "./topthree.ts";
 import type { Reply } from "./router.ts";
 import type { TelegramStateStore } from "./state.ts";
 
@@ -13,6 +15,9 @@ export const CALLBACK_DATA_MAX_BYTES = 64;
 
 export const RATING_FIELDS = ["mood", "energy", "focus", "satisfaction"] as const;
 export type RatingField = (typeof RATING_FIELDS)[number];
+
+export type TopThreeAction = "rewrite" | "copy" | "guide";
+const TOP_THREE_CODES = { rewrite: "r", copy: "y", guide: "g" } as const satisfies Record<TopThreeAction, string>;
 
 // ---------- wire formats ----------
 
@@ -28,6 +33,7 @@ type ReviewStep = "rv:next" | "rv:resume";
 type ReviewSkip<Q extends Num> = `rv:skip:${Q}`;
 type ReviewFocus<Date extends string> = `rv:focus:${Date}`;
 type Carry = "c:f" | "c:d";
+type TopThree<Date extends string> = `tt:${(typeof TOP_THREE_CODES)[TopThreeAction]}:${Date}`;
 type GoalProgress<Id extends Num, N extends Num> = `g:${Id}:p:${N}`;
 type ProposalAnswer<MsgId extends Num, Idx extends Num> = `pr:${MsgId}:${Idx}:${"y" | "n"}`;
 
@@ -43,6 +49,7 @@ export type Callback =
   | { verb: "review_skip"; question: number }
   | { verb: "review_focus"; date: string }
   | { verb: "carry"; action: "forward" | "drop" }
+  | { verb: "top_three"; action: TopThreeAction; date: string }
   | { verb: "goal_progress"; goalId: number; progress: number }
   | { verb: "proposal"; msgId: number; idx: number; approve: boolean };
 
@@ -56,7 +63,7 @@ const MAX_PROPOSAL_IDX = 99;
 type MaxId = "9007199254740991"; // Number.MAX_SAFE_INTEGER — the largest id parseCallback accepts
 type Widest =
   | TaskDone<MaxId> | TaskSchedule<MaxId, "365"> | TaskLinkGoal<MaxId> | TaskAskGuide<MaxId> | TaskDelete<MaxId> | ActualMin<MaxId, "1440"> | Rating<RatingField, "5">
-  | ReviewStep | ReviewSkip<"9"> | ReviewFocus<"2026-12-31"> | Carry | GoalProgress<MaxId, "100"> | ProposalAnswer<MaxId, "99">;
+  | ReviewStep | ReviewSkip<"9"> | ReviewFocus<"2026-12-31"> | Carry | TopThree<"2026-12-31"> | GoalProgress<MaxId, "100"> | ProposalAnswer<MaxId, "99">;
 type Budget<N extends number, T extends 0[] = []> = T["length"] extends N ? T : Budget<N, [...T, 0]>;
 type Fits<S extends string, B extends 0[]> = S extends `${infer _}${infer Rest}`
   ? B extends [0, ...infer Left extends 0[]] ? Fits<Rest, Left> : false
@@ -119,6 +126,10 @@ export function parseCallback(data: string): Callback | null {
     }
     case "c":
       return p.length === 2 && (p[1] === "f" || p[1] === "d") ? { verb: "carry", action: p[1] === "f" ? "forward" : "drop" } : null;
+    case "tt": {
+      const action = (Object.keys(TOP_THREE_CODES) as TopThreeAction[]).find((a) => TOP_THREE_CODES[a] === p[1]);
+      return p.length === 3 && action && isDate(p[2]) ? { verb: "top_three", action, date: p[2] } : null;
+    }
     case "g": {
       const goalId = toId(p[1]), progress = toInt(p[3], 0, 100);
       return p.length === 4 && p[2] === "p" && goalId !== null && progress !== null
@@ -153,6 +164,7 @@ export const cb = {
   reviewSkip: (question: number): ReviewSkip<number> => checked(`rv:skip:${question}` as const),
   reviewFocus: (date: string): ReviewFocus<string> => checked(`rv:focus:${date}` as const),
   carry: (action: "forward" | "drop"): Carry => checked(action === "forward" ? "c:f" : "c:d"),
+  topThree: (action: TopThreeAction, date: string): TopThree<string> => checked(`tt:${TOP_THREE_CODES[action]}:${date}` as const),
   goalProgress: (goalId: number, progress: number): GoalProgress<number, number> =>
     checked(`g:${goalId}:p:${progress}` as const),
   proposal: (msgId: number, idx: number, approve: boolean): ProposalAnswer<number, number> =>
@@ -177,6 +189,8 @@ export interface CallbackContext {
   send(reply: Reply): Promise<void>;
   /** This user's telegram_state slot. */
   state: TelegramStateStore;
+  /** Model settings for Guide turns started from a button (🤖 让道引拟). */
+  guide: GuideEnv;
 }
 
 /** Route one button tap. Always answers the callback query, even on bad data or errors. */
@@ -193,6 +207,8 @@ export async function handleCallback(ctx: CallbackContext, data: string): Promis
     else if (parsed.verb === "review") toast = parsed.step === "next" ? await reviewNext(ctx) : await reviewResume(ctx);
     else if (parsed.verb === "review_skip") toast = await reviewSkip(ctx, parsed.question);
     else if (parsed.verb === "review_focus") toast = await reviewFocus(ctx, parsed.date);
+    else if (parsed.verb === "top_three") toast = await topThreeButton(ctx, parsed.action, parsed.date);
+    else if (parsed.verb === "proposal") toast = await proposalAnswer(ctx, parsed.msgId, parsed.idx, parsed.approve);
     else toast = "尚未支持 · Not available yet"; // the remaining verbs land with their features
   } finally {
     await ctx.answer(toast);
