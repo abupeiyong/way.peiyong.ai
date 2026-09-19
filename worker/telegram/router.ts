@@ -7,6 +7,7 @@
 // The webhook (#6) verifies the update, resolves the Way user once and supplies the
 // handlers; this module only decides which one runs.
 
+import { underLimit } from "../auth.ts";
 import { captureToInbox } from "../tasks.ts";
 import { cb } from "./callback.ts";
 
@@ -107,6 +108,18 @@ export async function routeUpdate(update: TgUpdate, h: RouteHandlers): Promise<R
   if (message.reply_to_message && (await h.guideReply(message, text))) return "guide";
   await h.capture(message, text);
   return "capture";
+}
+
+// ---------- flood guard (PRD §11.2) ----------
+
+export const SLOW_DOWN: Reply = { text: "慢一点 · Slow down — 一分钟内消息太多，稍等再发。" };
+
+/**
+ * Per-user flood guard: 10 messages a minute (the TG_FLOOD_LIMITER binding), checked by the webhook
+ * before routeUpdate. Returns false once the user is over the limit — reply SLOW_DOWN and drop the update.
+ */
+export function floodGuard(limiter: RateLimit | undefined, userId: number): Promise<boolean> {
+  return underLimit(limiter, `tg:${userId}`);
 }
 
 // ---------- step 5: inbox capture ----------
