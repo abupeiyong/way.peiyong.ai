@@ -7,7 +7,7 @@ import { carryOver, deleteTask, updateTask } from "../tasks.ts";
 import { REVIEW_QUESTIONS } from "../../shared/reviews.ts";
 import type { GuideEnv } from "../guide.ts";
 import { rateDay, reviewFocus, reviewNext, reviewResume, reviewSkip } from "./review.ts";
-import { carryOnMorning, topThreeDone } from "./compose.ts";
+import { carryOnMorning, sendMorning, topThreeDone } from "./compose.ts";
 import { proposalAnswer, topThreeButton } from "./topthree.ts";
 import type { Reply } from "./router.ts";
 import type { TelegramStateStore } from "./state.ts";
@@ -40,6 +40,8 @@ type TopThree<Date extends string> = `tt:${(typeof TOP_THREE_CODES)[TopThreeActi
 type TopDone<N extends Num, Date extends string> = `td:${N}:${Date}`;
 type GoalProgress<Id extends Num, N extends Num> = `g:${Id}:p:${N}`;
 type ProposalAnswer<MsgId extends Num, Idx extends Num> = `pr:${MsgId}:${Idx}:${"y" | "n"}`;
+/** "Send me today's brief" on the link welcome (link.ts). */
+type Brief = "br";
 
 export type Callback =
   | { verb: "task_done"; taskId: number }
@@ -56,7 +58,8 @@ export type Callback =
   | { verb: "top_three"; action: TopThreeAction; date: string }
   | { verb: "top_done"; n: 1 | 2 | 3; date: string }
   | { verb: "goal_progress"; goalId: number; progress: number }
-  | { verb: "proposal"; msgId: number; idx: number; approve: boolean };
+  | { verb: "proposal"; msgId: number; idx: number; approve: boolean }
+  | { verb: "brief" };
 
 // Numeric bounds; the build-time assertion below is checked against their widest values.
 const MAX_OFFSET_DAYS = 365;
@@ -68,7 +71,7 @@ const MAX_PROPOSAL_IDX = 99;
 type MaxId = "9007199254740991"; // Number.MAX_SAFE_INTEGER — the largest id parseCallback accepts
 type Widest =
   | TaskDone<MaxId> | TaskSchedule<MaxId, "365"> | TaskLinkGoal<MaxId> | TaskAskGuide<MaxId> | TaskDelete<MaxId> | ActualMin<MaxId, "1440"> | Rating<RatingField, "5">
-  | ReviewStep | ReviewSkip<"9"> | ReviewFocus<"2026-12-31"> | Carry<"2026-12-31"> | TopThree<"2026-12-31"> | TopDone<"3", "2026-12-31"> | GoalProgress<MaxId, "100"> | ProposalAnswer<MaxId, "99">;
+  | ReviewStep | ReviewSkip<"9"> | ReviewFocus<"2026-12-31"> | Carry<"2026-12-31"> | TopThree<"2026-12-31"> | TopDone<"3", "2026-12-31"> | GoalProgress<MaxId, "100"> | ProposalAnswer<MaxId, "99"> | Brief;
 type Budget<N extends number, T extends 0[] = []> = T["length"] extends N ? T : Budget<N, [...T, 0]>;
 type Fits<S extends string, B extends 0[]> = S extends `${infer _}${infer Rest}`
   ? B extends [0, ...infer Left extends 0[]] ? Fits<Rest, Left> : false
@@ -153,6 +156,8 @@ export function parseCallback(data: string): Callback | null {
       return p.length === 4 && (p[3] === "y" || p[3] === "n") && msgId !== null && idx !== null
         ? { verb: "proposal", msgId, idx, approve: p[3] === "y" } : null;
     }
+    case "br":
+      return p.length === 1 ? { verb: "brief" } : null;
   }
   return null;
 }
@@ -186,6 +191,7 @@ export const cb = {
     checked(`g:${goalId}:p:${progress}` as const),
   proposal: (msgId: number, idx: number, approve: boolean): ProposalAnswer<number, number> =>
     checked(`pr:${msgId}:${idx}:${approve ? "y" : "n"}` as const),
+  brief: (): Brief => checked("br"),
 };
 
 // ---------- handlers ----------
@@ -227,6 +233,7 @@ export async function handleCallback(ctx: CallbackContext, data: string): Promis
     else if (parsed.verb === "top_three") toast = await topThreeButton(ctx, parsed.action, parsed.date);
     else if (parsed.verb === "top_done") toast = await topThreeDone(ctx, parsed.n, parsed.date);
     else if (parsed.verb === "proposal") toast = await proposalAnswer(ctx, parsed.msgId, parsed.idx, parsed.approve);
+    else if (parsed.verb === "brief") toast = await brief(ctx);
     else toast = "尚未支持 · Not available yet"; // the remaining verbs land with their features
   } finally {
     await ctx.answer(toast);
@@ -247,6 +254,12 @@ async function taskDone(ctx: CallbackContext, taskId: number): Promise<string> {
   if (!task) return "找不到这件事 · Task not found"; // unknown or another user's id: nothing changes
   await ctx.finish(`✓ 已完成 · Done\n${task.title}`);
   return "已经完成了 · Already done";
+}
+
+// A fresh morning message rather than an edit, so tapping again later in the day shows the day as it is then.
+async function brief(ctx: CallbackContext): Promise<string> {
+  await sendMorning(ctx);
+  return "已发 · Sent";
 }
 
 export function shiftDate(date: string, days: number): string {

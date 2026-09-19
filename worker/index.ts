@@ -12,6 +12,7 @@ import { upsertReview, type ReviewInput } from "./reviews.ts";
 import { issueOtp, redeemOtp, OTP_TTL_SECONDS } from "./telegram/otp.ts";
 import { sendMorning } from "./telegram/compose.ts";
 import { updateTelegramPrefs } from "./telegram/prefs.ts";
+import { isLinkNonce, linkStatus, linkUrl, startLink, LINK_TTL_SECONDS } from "./telegram/link.ts";
 import {
   runSchedules, isDisconnected, localDate, sendMessage, TelegramApiError, DISCONNECTED_UNTIL,
 } from "./telegram/schedule.ts";
@@ -20,7 +21,7 @@ import { verifyWidgetLogin } from "./telegram/widget.ts";
 import { BadInput, coerceFields, dateOrNull, idOrNull, int, nonEmptyText, oneOf, text, type FieldSpecs } from "./validate.ts";
 import type {
   GoalLevel, GoalStatus, GoalType, GuideProposal, Priority, ReviewPeriod, SecuritySettings,
-  TelegramPrefs, TelegramSettings,
+  TelegramLinkStart, TelegramPrefs, TelegramSettings,
 } from "../shared/types.ts";
 
 export interface Env {
@@ -303,7 +304,7 @@ app.put("/api/security", async (c) => {
 });
 
 // ---------- telegram settings ----------
-// The Settings → Telegram card (PRD §5.1 step 6, §9). Linking itself happens in the bot (#7).
+// The Settings → Telegram card (PRD §5.1 step 6, §9). Linking: /api/telegram/link/* here, the bot side in telegram/link.ts.
 // Schema assumed from #2/#4: telegram_accounts(user_id, chat_id, username, paused_until, …) — SELECT * so the
 // card still loads if username is missing — plus telegram_prefs and users.timezone (see telegram/prefs.ts).
 
@@ -330,6 +331,22 @@ app.get("/api/telegram", async (c) => {
     },
   };
   return c.json({ telegram });
+});
+
+// Link from the web: a deep link / QR the page shows, then polls until the bot has seen /start link_<nonce>.
+app.post("/api/telegram/link/start", async (c) => {
+  const bot = c.env.TELEGRAM_BOT_TOKEN ? c.env.TELEGRAM_BOT_USERNAME?.replace(/^@/, "") || null : null;
+  if (!bot) return c.json({ error: "Telegram is not configured." }, 503);
+  const code = await startLink(c.env.DB, c.get("userId"));
+  const url = linkUrl(bot, code);
+  const link: TelegramLinkStart = { code, url, qr: url, expires_in: LINK_TTL_SECONDS };
+  return c.json(link);
+});
+
+app.get("/api/telegram/link/status", async (c) => {
+  const code = c.req.query("code");
+  if (!isLinkNonce(code)) return c.json({ error: "code must be the 32-hex link code." }, 400);
+  return c.json(await linkStatus(c.env.DB, c.get("userId"), code));
 });
 
 app.put("/api/telegram/prefs", async (c) => {

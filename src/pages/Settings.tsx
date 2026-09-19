@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.ts";
-import type { Area, SecuritySettings, TelegramPrefs, TelegramSettings } from "../../shared/types.ts";
+import type {
+  Area, SecuritySettings, TelegramLinkStart, TelegramLinkStatus, TelegramPrefs, TelegramSettings,
+} from "../../shared/types.ts";
 import { useApp } from "../App.tsx";
 import { Icon } from "../components/Icon.tsx";
+import { QrCode } from "../components/QrCode.tsx";
 
 export default function Settings() {
   const { user, nav, refreshUser } = useApp();
@@ -23,6 +26,9 @@ export default function Settings() {
   const [tgNote, setTgNote] = useState("");
   const [tgError, setTgError] = useState("");
   const [confirmUnlink, setConfirmUnlink] = useState(false);
+  // The link in progress (deep link + QR) and where the bot says it stands.
+  const [link, setLink] = useState<TelegramLinkStart | null>(null);
+  const [linkState, setLinkState] = useState<TelegramLinkStatus["state"]>("pending");
 
   const loadAreas = () => api.get<{ areas: Area[] }>("/api/goals").then((r) => setAreas(r.areas));
   useEffect(() => { loadAreas(); }, []);
@@ -38,6 +44,36 @@ export default function Settings() {
       })
       .catch(() => setTelegram(null));
   useEffect(() => { loadTelegram(); }, []);
+
+  const startLink = () => telegramAction("", async () => {
+    setLink(await api.post<TelegramLinkStart>("/api/telegram/link/start"));
+    setLinkState("pending");
+  });
+
+  // Poll while the nonce is live; once the bot has linked it, reload so the card flips to "Connected".
+  useEffect(() => {
+    if (!link || linkState !== "pending") return;
+    const deadline = Date.now() + link.expires_in * 1000;
+    let stopped = false;
+    const timer = setInterval(async () => {
+      if (Date.now() > deadline) {
+        setLinkState("expired");
+        return;
+      }
+      try {
+        const status = await api.get<TelegramLinkStatus>(`/api/telegram/link/status?code=${link.code}`);
+        if (stopped || status.state === "pending") return;
+        setLinkState(status.state);
+        if (status.state === "linked") {
+          setLink(null);
+          await loadTelegram();
+          setTgNote("已连接");
+          setTimeout(() => setTgNote(""), 1600);
+        }
+      } catch { /* a missed poll is retried on the next tick */ }
+    }, 2000);
+    return () => { stopped = true; clearInterval(timer); };
+  }, [link, linkState]);
 
   const telegramAction = async (note: string, action: () => Promise<unknown>) => {
     setTgError("");
@@ -190,20 +226,51 @@ export default function Settings() {
             {tgNote && <span className="chip green">{tgNote}</span>}
           </div>
           {!telegram.linked ? (
-            <p className="muted small">
-              {telegram.bot ? (
-                <>
-                  在 Telegram 打开 <a href={`https://t.me/${telegram.bot}`} target="_blank" rel="noreferrer">@{telegram.bot}</a> 连接你的账号。<br />
-                  Open <a href={`https://t.me/${telegram.bot}`} target="_blank" rel="noreferrer">@{telegram.bot}</a> in Telegram to connect your account.
-                </>
-              ) : (
-                <>Telegram 尚未配置。<br />Telegram is not configured on this server.</>
-              )}
-            </p>
+            !telegram.bot ? (
+              <p className="muted small">Telegram 尚未配置。<br />Telegram is not configured on this server.</p>
+            ) : !link ? (
+              <div className="stack">
+                <p className="muted small">
+                  连接 Telegram，每天早上收晨报，晚上复盘，随手记进 Inbox。<br />
+                  Connect Telegram for a morning brief, an evening review, and capture from anywhere.
+                </p>
+                <div>
+                  <button className="btn" onClick={startLink}>Connect Telegram</button>
+                </div>
+              </div>
+            ) : linkState === "pending" ? (
+              <div className="tg-link">
+                <QrCode value={link.qr} label="Scan to connect Telegram" />
+                <div className="stack">
+                  <p className="muted small">
+                    用手机扫码，或在这台设备上打开 Telegram，点「Start」。<br />
+                    Scan with your phone, or open Telegram on this device and tap Start.
+                  </p>
+                  <div className="row">
+                    <a className="btn" href={link.url} target="_blank" rel="noreferrer">Open in Telegram</a>
+                    <button className="btn ghost small" onClick={() => setLink(null)}>Cancel</button>
+                  </div>
+                  <p className="muted mini">等待连接… 五分钟内有效。Waiting — the link works for 5 minutes.</p>
+                </div>
+              </div>
+            ) : (
+              <div className="stack">
+                <p className="small" style={{ color: "var(--red)" }}>
+                  {linkState === "refused" ? (
+                    <>这个 Telegram 账号已连接了另一个 Way 账号。<br />That Telegram account is already linked to another Way account.</>
+                  ) : (
+                    <>连接已过期。<br />The link expired before Telegram opened it.</>
+                  )}
+                </p>
+                <div>
+                  <button className="btn" onClick={startLink}>Try again</button>
+                </div>
+              </div>
+            )
           ) : (
             <div className="stack">
               <div className="spread">
-                <span>{telegram.username ? `@${telegram.username}` : "Telegram account linked"}</span>
+                <span>{telegram.username ? `Connected as @${telegram.username}` : "Telegram account linked"}</span>
                 <div className="row">
                   <button className="btn ghost small" onClick={sendTest}>Send me today's brief</button>
                   {confirmUnlink ? (

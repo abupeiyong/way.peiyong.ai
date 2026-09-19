@@ -15,6 +15,8 @@ import { cb } from "./callback.ts";
 
 export interface TgUser {
   id: number;
+  username?: string;
+  first_name?: string;
 }
 
 export interface TgMessage {
@@ -39,10 +41,10 @@ export interface TgUpdate {
   callback_query?: TgCallbackQuery;
 }
 
-export interface InlineKeyboardButton {
-  text: string;
-  callback_data: string;
-}
+export type InlineKeyboardButton =
+  | { text: string; callback_data: string }
+  /** Opens the URL in the browser; no callback query comes back. */
+  | { text: string; url: string };
 
 export interface InlineKeyboardMarkup {
   inline_keyboard: InlineKeyboardButton[][];
