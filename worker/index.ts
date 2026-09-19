@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import { hashPassword, verifyPassword, newSessionToken, sessionCookie, SESSION_COOKIE, SESSION_DAYS } from "./auth.ts";
 import { chatComplete, extractProposals, type ChatMsg } from "./guide.ts";
+import { carryOver } from "./tasks.ts";
 import type { GoalLevel, GuideProposal, ReviewPeriod } from "../shared/types.ts";
 
 export interface Env {
@@ -284,15 +285,7 @@ app.post("/api/carry", async (c) => {
   const userId = c.get("userId");
   const { date, action } = await c.req.json<{ date: string; action: "forward" | "drop" }>();
   assertDate(date);
-  if (action === "forward") {
-    await c.env.DB.prepare(
-      "UPDATE tasks SET date = ?, start_min = NULL, end_min = NULL, carried = carried + 1 WHERE user_id = ? AND inbox = 0 AND done = 0 AND dropped = 0 AND date < ? AND repeat = 'never'"
-    ).bind(date, userId, date).run();
-  } else {
-    await c.env.DB.prepare(
-      "UPDATE tasks SET dropped = 1 WHERE user_id = ? AND inbox = 0 AND done = 0 AND dropped = 0 AND date < ? AND repeat = 'never'"
-    ).bind(userId, date).run();
-  }
+  await carryOver(c.env.DB, userId, date, action === "forward" ? "forward" : "drop");
   return c.json({ ok: true });
 });
 

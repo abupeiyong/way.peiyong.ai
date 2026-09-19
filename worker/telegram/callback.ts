@@ -1,0 +1,186 @@
+// Telegram callback_data protocol (PRD §7.3) and the shared button handlers.
+// callback_data is client-supplied, replayable and capped at 64 bytes, so it only
+// ever carries short opaque verbs and ids — never free text — and every handler
+// re-checks ownership against the user resolved from the chat, not from the data.
+
+import { carryOver } from "../tasks.ts";
+
+export const CALLBACK_DATA_MAX_BYTES = 64;
+
+export const RATING_FIELDS = ["mood", "energy", "focus", "satisfaction"] as const;
+export type RatingField = (typeof RATING_FIELDS)[number];
+
+// ---------- wire formats ----------
+
+type Num = number | string;
+type TaskDone<Id extends Num> = `t:${Id}:d`;
+type TaskSchedule<Id extends Num, Days extends Num> = `t:${Id}:s:${Days}`;
+type ActualMin<Id extends Num, Min extends Num> = `am:${Id}:${Min}`;
+type Rating<F extends RatingField, N extends Num> = `rt:${F}:${N}`;
+type ReviewStep = "rv:next" | "rv:skip";
+type Carry = "c:f" | "c:d";
+type GoalProgress<Id extends Num, N extends Num> = `g:${Id}:p:${N}`;
+type ProposalAnswer<MsgId extends Num, Idx extends Num> = `pr:${MsgId}:${Idx}:${"y" | "n"}`;
+
+export type Callback =
+  | { verb: "task_done"; taskId: number }
+  | { verb: "task_schedule"; taskId: number; offsetDays: number }
+  | { verb: "actual_min"; taskId: number; min: number }
+  | { verb: "rating"; field: RatingField; n: number }
+  | { verb: "review"; step: "next" | "skip" }
+  | { verb: "carry"; action: "forward" | "drop" }
+  | { verb: "goal_progress"; goalId: number; progress: number }
+  | { verb: "proposal"; msgId: number; idx: number; approve: boolean };
+
+// Numeric bounds; the build-time assertion below is checked against their widest values.
+const MAX_OFFSET_DAYS = 365;
+const MAX_ACTUAL_MIN = 1440;
+const MAX_PROPOSAL_IDX = 99;
+
+// Build-time assertion: the widest payload of every verb fits in 64 bytes (all ASCII,
+// so characters = bytes). Changing a format to something longer fails `npm run typecheck`.
+type MaxId = "9007199254740991"; // Number.MAX_SAFE_INTEGER — the largest id parseCallback accepts
+type Widest =
+  | TaskDone<MaxId> | TaskSchedule<MaxId, "365"> | ActualMin<MaxId, "1440"> | Rating<RatingField, "5">
+  | ReviewStep | Carry | GoalProgress<MaxId, "100"> | ProposalAnswer<MaxId, "99">;
+type Budget<N extends number, T extends 0[] = []> = T["length"] extends N ? T : Budget<N, [...T, 0]>;
+type Fits<S extends string, B extends 0[]> = S extends `${infer _}${infer Rest}`
+  ? B extends [0, ...infer Left extends 0[]] ? Fits<Rest, Left> : false
+  : true;
+type AssertTrue<T extends true> = T;
+export type CallbackDataFits = AssertTrue<Fits<Widest, Budget<typeof CALLBACK_DATA_MAX_BYTES>>>;
+
+function byteLength(s: string): number {
+  return new TextEncoder().encode(s).length;
+}
+
+function toId(s: string | undefined): number | null {
+  if (!s || !/^[1-9]\d{0,15}$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+function toInt(s: string | undefined, min: number, max: number): number | null {
+  if (!s || !/^(0|[1-9]\d{0,3})$/.test(s)) return null;
+  const n = Number(s);
+  return n >= min && n <= max ? n : null;
+}
+
+/** Strict parse; anything malformed, out of range or over 64 bytes is null. */
+export function parseCallback(data: string): Callback | null {
+  if (byteLength(data) > CALLBACK_DATA_MAX_BYTES) return null;
+  const p = data.split(":");
+  switch (p[0]) {
+    case "t": {
+      const taskId = toId(p[1]);
+      if (taskId === null) return null;
+      if (p.length === 3 && p[2] === "d") return { verb: "task_done", taskId };
+      const offsetDays = toInt(p[3], 0, MAX_OFFSET_DAYS);
+      if (p.length === 4 && p[2] === "s" && offsetDays !== null) return { verb: "task_schedule", taskId, offsetDays };
+      return null;
+    }
+    case "am": {
+      const taskId = toId(p[1]), min = toInt(p[2], 0, MAX_ACTUAL_MIN);
+      return p.length === 3 && taskId !== null && min !== null ? { verb: "actual_min", taskId, min } : null;
+    }
+    case "rt": {
+      const field = RATING_FIELDS.find((f) => f === p[1]), n = toInt(p[2], 1, 5);
+      return p.length === 3 && field && n !== null ? { verb: "rating", field, n } : null;
+    }
+    case "rv":
+      return p.length === 2 && (p[1] === "next" || p[1] === "skip") ? { verb: "review", step: p[1] } : null;
+    case "c":
+      return p.length === 2 && (p[1] === "f" || p[1] === "d") ? { verb: "carry", action: p[1] === "f" ? "forward" : "drop" } : null;
+    case "g": {
+      const goalId = toId(p[1]), progress = toInt(p[3], 0, 100);
+      return p.length === 4 && p[2] === "p" && goalId !== null && progress !== null
+        ? { verb: "goal_progress", goalId, progress } : null;
+    }
+    case "pr": {
+      const msgId = toId(p[1]), idx = toInt(p[2], 0, MAX_PROPOSAL_IDX);
+      return p.length === 4 && (p[3] === "y" || p[3] === "n") && msgId !== null && idx !== null
+        ? { verb: "proposal", msgId, idx, approve: p[3] === "y" } : null;
+    }
+  }
+  return null;
+}
+
+// Every encoded payload must parse back, which also enforces the 64-byte cap at runtime.
+function checked<S extends string>(s: S): S {
+  if (!parseCallback(s)) throw new Error(`invalid callback_data: ${s}`);
+  return s;
+}
+
+/** Builders for inline keyboard callback_data. */
+export const cb = {
+  taskDone: (taskId: number): TaskDone<number> => checked(`t:${taskId}:d` as const),
+  taskSchedule: (taskId: number, offsetDays: number): TaskSchedule<number, number> =>
+    checked(`t:${taskId}:s:${offsetDays}` as const),
+  actualMin: (taskId: number, min: number): ActualMin<number, number> => checked(`am:${taskId}:${min}` as const),
+  rating: (field: RatingField, n: number): Rating<RatingField, number> => checked(`rt:${field}:${n}` as const),
+  review: (step: "next" | "skip"): ReviewStep => checked(`rv:${step}` as const),
+  carry: (action: "forward" | "drop"): Carry => checked(action === "forward" ? "c:f" : "c:d"),
+  goalProgress: (goalId: number, progress: number): GoalProgress<number, number> =>
+    checked(`g:${goalId}:p:${progress}` as const),
+  proposal: (msgId: number, idx: number, approve: boolean): ProposalAnswer<number, number> =>
+    checked(`pr:${msgId}:${idx}:${approve ? "y" : "n"}` as const),
+};
+
+// ---------- handlers ----------
+
+export interface CallbackContext {
+  db: D1Database;
+  /** Owner of the chat the tap came from, resolved by the webhook — never taken from callback_data. */
+  userId: number;
+  /** The user's local YYYY-MM-DD. */
+  today: string;
+  /** answerCallbackQuery — stops the client's spinner. handleCallback calls it exactly once per tap. */
+  answer(text?: string): Promise<void>;
+  /** Edit the tapped message to its terminal state (buttons removed), so a second device cannot re-apply. */
+  finish(text: string): Promise<void>;
+}
+
+/** Route one button tap. Always answers the callback query, even on bad data or errors. */
+export async function handleCallback(ctx: CallbackContext, data: string): Promise<void> {
+  let toast: string | undefined;
+  try {
+    const parsed = parseCallback(data);
+    if (!parsed) toast = "无效按钮 · Invalid button";
+    else if (parsed.verb === "task_done") toast = await taskDone(ctx, parsed.taskId);
+    else if (parsed.verb === "carry") toast = await carry(ctx, parsed.action);
+    else toast = "尚未支持 · Not available yet"; // the remaining verbs land with their features
+  } finally {
+    await ctx.answer(toast);
+  }
+}
+
+// Marks done rather than toggling, so a replayed or double tap applies once.
+async function taskDone(ctx: CallbackContext, taskId: number): Promise<string> {
+  const row = await ctx.db.prepare(
+    "UPDATE tasks SET done = 1, done_at = datetime('now') WHERE id = ? AND user_id = ? AND done = 0 RETURNING title"
+  ).bind(taskId, ctx.userId).first<{ title: string }>();
+  if (row) {
+    await ctx.finish(`✓ 已完成 · Done\n${row.title}`);
+    return "已完成 · Done";
+  }
+  const task = await ctx.db.prepare("SELECT title FROM tasks WHERE id = ? AND user_id = ?")
+    .bind(taskId, ctx.userId).first<{ title: string }>();
+  if (!task) return "找不到这件事 · Task not found"; // unknown or another user's id: nothing changes
+  await ctx.finish(`✓ 已完成 · Done\n${task.title}`);
+  return "已经完成了 · Already done";
+}
+
+// Carrying is naturally idempotent: a second tap finds nothing left before today.
+async function carry(ctx: CallbackContext, action: "forward" | "drop"): Promise<string> {
+  const n = await carryOver(ctx.db, ctx.userId, ctx.today, action);
+  if (n === 0) {
+    await ctx.finish("没有待处理的旧事 · Nothing left to carry");
+    return "已处理过 · Already handled";
+  }
+  if (action === "forward") {
+    await ctx.finish(`→ 已顺延 ${n} 件到今天 · Carried ${n} forward to today`);
+    return "已顺延 · Carried forward";
+  }
+  await ctx.finish(`已放下 ${n} 件 · Let go of ${n}`);
+  return "已放下 · Let go";
+}
