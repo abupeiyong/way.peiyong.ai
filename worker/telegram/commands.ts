@@ -1,0 +1,273 @@
+// The command table (PRD §7.2, #20/#21): every `/name args` the bot understands. Deterministic, no model
+// calls except /guide. The webhook resolves the user and builds the context; this module only acts.
+//   /start        link/login payloads (link.ts, login.ts) or a hello
+//   /today        the day: top three with ✓, tasks with ✓, inbox count, carry row
+//   /plan         ask for the top three (topthree.ts)
+//   /task <text>  micro-syntax in taskparse.ts → a task for today (or the date given)
+//   /done         open tasks as ✓ buttons        /inbox   inbox items with [今天] [明天] [🗑]
+//   /week         this week's plan (weekly.ts)   /goals   goals.ts        /review [daily|weekly]
+//   /note <text>  append to today's reflection   /guide <text>            /find <text>
+//   /timezone /settings /mute /unlink            account.ts
+//   /help         this list
+
+import { updateDay } from "../days.ts";
+import { materializeRepeats } from "../tasks.ts";
+import { muteCommand, settingsCommand, timezoneCommand, unlinkCommand } from "./account.ts";
+import { fmtMin } from "./blocks.ts";
+import { cb, shiftDate, type CallbackContext } from "./callback.ts";
+import { logEvent } from "./events.ts";
+import { findGoal, goalLine, goalsCommand } from "./goals.ts";
+import { guideTurn } from "./guide.ts";
+import { loginRequest } from "./login.ts";
+import { interruptReview, startReview } from "./review.ts";
+import type { Reply, TgMessage } from "./router.ts";
+import { parseTaskInput } from "./taskparse.ts";
+import { askTopThree } from "./topthree.ts";
+import { weekCommand } from "./weekly.ts";
+
+export const HELP: Reply = {
+  text: [
+    "Way · 道 — 命令 · Commands",
+    "",
+    "/today  今天的三件事和任务 · Today's plan",
+    "/plan  定今天的三件事 · Set the top three",
+    "/task 明天 打电话给银行 @目标 #30m !must  记一件事 · Add a task",
+    "/done  勾掉一件事 · Tick off a task",
+    "/inbox  收件箱 · Inbox",
+    "/week  本周计划 · This week",
+    "/goals  目标进度 · Goals",
+    "/review  今日复盘 · Review the day（/review weekly 周复盘）",
+    "/note 一句话  记进今天的反思 · Add to today's reflection",
+    "/guide 问题  问道引 · Ask the Guide",
+    "/find 关键词  查找 · Find tasks and goals",
+    "/timezone /settings /mute /unlink",
+    "",
+    "随手发一句话，就收进 Inbox · Anything else you send goes to your inbox.",
+  ].join("\n"),
+};
+
+const CONNECTED: Reply = {
+  text: "已连接 · You're connected.\n随手发一句话，就收进 Inbox · Send me anything and it goes to your inbox.\n/help 看全部命令 · /help for every command",
+};
+
+export type CommandContext = CallbackContext;
+
+export async function handleCommand(ctx: CommandContext, name: string, args: string, _message: TgMessage): Promise<void> {
+  await logEvent(ctx.db, ctx.userId, "command", "used");
+  switch (name) {
+    case "start":
+      if (await loginRequest(ctx, args)) return;
+      await ctx.send(CONNECTED);
+      break;
+    case "help": await ctx.send(HELP); break;
+    case "today": await ctx.send(await todayCard(ctx)); break;
+    case "plan": await askTopThree(ctx); break;
+    case "task": await taskCommand(ctx, args); break;
+    case "add": await taskCommand(ctx, args); break;
+    case "done": await ctx.send(await doneCard(ctx)); break;
+    case "inbox": await inboxCommand(ctx); break;
+    case "week": await weekCommand(ctx); break;
+    case "goals": await goalsCommand(ctx); break;
+    case "review": await startReview(ctx, /^w/i.test(args) ? "weekly" : "daily"); return; // starts its own state
+    case "note": await noteCommand(ctx, args); break;
+    case "guide": await guideCommand(ctx, args); break;
+    case "find": await findCommand(ctx, args); break;
+    case "timezone": case "tz": await timezoneCommand(ctx, args); return; // may open its own state
+    case "settings": await settingsCommand(ctx); break;
+    case "mute": await muteCommand(ctx, args); break;
+    case "unlink": await unlinkCommand(ctx); break;
+    default:
+      await ctx.send({ text: `不认识 /${name} · Unknown command. /help 看全部 · /help lists them all.` });
+  }
+  // Any command pauses a review in progress and offers to continue.
+  const paused = await interruptReview(ctx);
+  if (paused) await ctx.send(paused);
+}
+
+// ---------- /today ----------
+
+interface TaskRow { id: number; title: string; start_min: number | null; end_min: number | null; done: number; estimate_min: number | null }
+
+function shortTitle(t: string, max = 36): string {
+  return t.length > max ? t.slice(0, max - 1) + "…" : t;
+}
+
+async function todayCard(ctx: CommandContext): Promise<Reply> {
+  const { db, userId, today } = ctx;
+  await materializeRepeats(db, userId, today);
+  const day = await db.prepare("SELECT top1, top1_done, top2, top2_done, top3, top3_done FROM days WHERE user_id = ? AND date = ?")
+    .bind(userId, today).first<Record<string, string | number>>();
+  const { results: tasks } = await db.prepare(
+    "SELECT id, title, start_min, end_min, done, estimate_min FROM tasks WHERE user_id = ? AND date = ? AND inbox = 0 AND dropped = 0 ORDER BY done, start_min IS NULL, start_min, id"
+  ).bind(userId, today).all<TaskRow>();
+  const inbox = await db.prepare("SELECT COUNT(*) AS n FROM tasks WHERE user_id = ? AND inbox = 1 AND done = 0 AND dropped = 0").bind(userId).first<{ n: number }>();
+  const carry = await db.prepare(
+    "SELECT COUNT(*) AS n FROM tasks WHERE user_id = ? AND inbox = 0 AND done = 0 AND dropped = 0 AND date < ? AND repeat = 'never'"
+  ).bind(userId, today).first<{ n: number }>();
+
+  const tops = ([1, 2, 3] as const).map((n) => ({ n, text: String(day?.[`top${n}`] ?? "").trim(), done: !!day?.[`top${n}_done`] })).filter((t) => t.text);
+  const lines = [`🗓 今天 · Today ${today}`];
+  if (tops.length) {
+    lines.push("", "🎯 三件事 · Top three", ...tops.map((t) => `${t.done ? "✓" : `${t.n}.`} ${t.text}`));
+  } else {
+    lines.push("", "🎯 三件事还没定 · No top three yet — /plan");
+  }
+  if (tasks.length) {
+    lines.push("", `📋 任务 · Tasks ${tasks.filter((t) => t.done).length}/${tasks.length}`,
+      ...tasks.map((t) => `${t.done ? "✓" : "○"} ${t.start_min !== null ? `${fmtMin(t.start_min)}${t.end_min !== null ? `–${fmtMin(t.end_min)}` : ""}  ` : ""}${t.title}`));
+  } else {
+    lines.push("", "📋 今天没有任务 · No tasks today — /task 记一件");
+  }
+  if (inbox?.n) lines.push("", `📥 Inbox 里有 ${inbox.n} 件 · ${inbox.n} in the inbox — /inbox`);
+  if (carry?.n) lines.push(`⤴ 有 ${carry.n} 件旧事未完成 · ${carry.n} unfinished from earlier days`);
+
+  const keyboard = [
+    ...(tops.some((t) => !t.done) ? [tops.filter((t) => !t.done).map((t) => ({ text: `✓ 三件事 ${t.n}`, callback_data: cb.topDone(t.n, today) }))] : []),
+    ...tasks.filter((t) => !t.done).slice(0, 12).map((t) => [{ text: `✓ ${shortTitle(t.title)}`, callback_data: cb.taskDone(t.id) }]),
+    ...(carry?.n ? [[
+      { text: `⤴ 顺延 ${carry.n}`, callback_data: cb.carry("forward") },
+      { text: "放下 Let go", callback_data: cb.carry("drop") },
+    ]] : []),
+  ];
+  return { text: lines.join("\n"), ...(keyboard.length && { reply_markup: { inline_keyboard: keyboard } }) };
+}
+
+// ---------- /task ----------
+
+function taskCard(task: { id: number; title: string }, when: string, extras: string[]): Reply {
+  return {
+    text: `📝 已记到${when} · Added\n${task.title}${extras.length ? `\n${extras.join(" · ")}` : ""}`,
+    reply_markup: {
+      inline_keyboard: [[
+        { text: "✓ 完成", callback_data: cb.taskDone(task.id) },
+        { text: "📅 明天", callback_data: cb.taskSchedule(task.id, 1) },
+        { text: "🎯 链接目标", callback_data: cb.taskLinkGoal(task.id) },
+        { text: "🗑", callback_data: cb.taskDelete(task.id) },
+      ]],
+    },
+  };
+}
+
+async function taskCommand(ctx: CommandContext, args: string): Promise<void> {
+  if (!args.trim()) {
+    await ctx.send({ text: "用法 · Usage: /task 明天 打电话给银行 @目标 #30m !must\n日期、@目标、#时长、!优先级都可选 · date, @goal, #minutes and !priority are all optional" });
+    return;
+  }
+  const p = parseTaskInput(args, ctx.today);
+  if (!p.title) {
+    await ctx.send({ text: "任务写什么？ · What is the task? 例如 /task 明天 打电话给银行" });
+    return;
+  }
+  const date = p.date ?? ctx.today;
+  const goal = p.goalQuery ? await findGoal(ctx.db, ctx.userId, p.goalQuery) : null;
+  const row = await ctx.db.prepare(
+    "INSERT INTO tasks (user_id, title, date, inbox, priority, estimate_min, goal_id) VALUES (?, ?, ?, 0, ?, ?, ?) RETURNING id, title"
+  ).bind(ctx.userId, p.title, date, p.priority ?? "should", p.estimate_min, goal?.id ?? null).first<{ id: number; title: string }>();
+  if (!row) throw new Error("task insert failed");
+  const when = date === ctx.today ? "今天" : date === shiftDate(ctx.today, 1) ? "明天" : date;
+  const extras = [
+    ...(p.estimate_min ? [`${p.estimate_min} 分钟`] : []),
+    ...(p.priority ? [p.priority] : []),
+    ...(goal ? [`🎯 ${goal.title}`] : p.goalQuery ? [`（没找到目标「${p.goalQuery}」· no goal matched）`] : []),
+  ];
+  await logEvent(ctx.db, ctx.userId, "capture", "used");
+  await ctx.send(taskCard(row, when, extras));
+}
+
+// ---------- /done ----------
+
+async function doneCard(ctx: CommandContext): Promise<Reply> {
+  const { results } = await ctx.db.prepare(
+    "SELECT id, title, start_min, end_min, done, estimate_min FROM tasks WHERE user_id = ? AND date = ? AND inbox = 0 AND dropped = 0 AND done = 0 ORDER BY start_min IS NULL, start_min, id"
+  ).bind(ctx.userId, ctx.today).all<TaskRow>();
+  if (!results.length) return { text: "今天没有未完成的任务 ✓ · Nothing open today" };
+  return {
+    text: `✓ 点一下完成 · Tap to complete\n${results.map((t) => `○ ${t.title}`).join("\n")}`,
+    reply_markup: { inline_keyboard: results.slice(0, 20).map((t) => [{ text: `✓ ${shortTitle(t.title)}`, callback_data: cb.taskDone(t.id) }]) },
+  };
+}
+
+// ---------- /inbox ----------
+
+async function inboxCommand(ctx: CommandContext): Promise<void> {
+  const { results } = await ctx.db.prepare(
+    "SELECT id, title FROM tasks WHERE user_id = ? AND inbox = 1 AND done = 0 AND dropped = 0 ORDER BY id DESC LIMIT 10"
+  ).bind(ctx.userId).all<{ id: number; title: string }>();
+  if (!results.length) {
+    await ctx.send({ text: "Inbox 是空的 ✓ · Inbox is empty" });
+    return;
+  }
+  // One card per item so each keeps its own buttons after the others are handled.
+  for (const t of results) {
+    await ctx.send({
+      text: `📥 ${t.title}`,
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "📅 今天", callback_data: cb.taskSchedule(t.id, 0) },
+          { text: "📅 明天", callback_data: cb.taskSchedule(t.id, 1) },
+          { text: "🎯", callback_data: cb.taskLinkGoal(t.id) },
+          { text: "🗑", callback_data: cb.taskDelete(t.id) },
+        ]],
+      },
+    });
+  }
+}
+
+// ---------- /note ----------
+
+async function noteCommand(ctx: CommandContext, args: string): Promise<void> {
+  const text = args.trim();
+  if (!text) {
+    await ctx.send({ text: "用法 · Usage: /note 今天学到的一件事" });
+    return;
+  }
+  const day = await ctx.db.prepare("SELECT reflection FROM days WHERE user_id = ? AND date = ?").bind(ctx.userId, ctx.today).first<{ reflection: string }>();
+  const reflection = day?.reflection?.trim() ? `${day.reflection.trim()}\n${text}` : text;
+  await updateDay(ctx.db, ctx.userId, ctx.today, { reflection });
+  await ctx.send({ text: `📓 已记进今天的反思 · Added to today's reflection\n${text}` });
+}
+
+// ---------- /guide ----------
+
+async function guideCommand(ctx: CommandContext, args: string): Promise<void> {
+  const text = args.trim();
+  if (!text) {
+    await ctx.send({ text: "问道引什么？ · Ask the Guide anything: /guide 这个季度我该聚焦什么？\n或回复道引的任何一条消息继续对话 · or reply to any Guide message to continue." });
+    return;
+  }
+  await guideTurn(ctx, text);
+}
+
+// ---------- /find ----------
+
+async function findCommand(ctx: CommandContext, args: string): Promise<void> {
+  const q = args.trim();
+  if (!q) {
+    await ctx.send({ text: "用法 · Usage: /find 关键词" });
+    return;
+  }
+  const like = `%${q.toLowerCase().replace(/[%_]/g, "")}%`;
+  const { results: tasks } = await ctx.db.prepare(
+    "SELECT id, title, date, done FROM tasks WHERE user_id = ? AND dropped = 0 AND lower(title) LIKE ? ORDER BY done, date IS NULL, date DESC, id DESC LIMIT 8"
+  ).bind(ctx.userId, like).all<{ id: number; title: string; date: string | null; done: number }>();
+  const { results: goals } = await ctx.db.prepare(
+    `SELECT g.id, g.title, g.level, g.status, g.progress, g.target_date, a.name AS area FROM goals g LEFT JOIN areas a ON a.id = g.area_id
+      WHERE g.user_id = ? AND g.status NOT IN ('archived','abandoned') AND lower(g.title) LIKE ? ORDER BY g.status = 'completed', g.id LIMIT 6`
+  ).bind(ctx.userId, like).all<{ id: number; title: string; level: "year"; status: string; progress: number; target_date: string | null; area: string | null }>();
+  if (!tasks.length && !goals.length) {
+    await ctx.send({ text: `没找到「${q}」 · Nothing matched` });
+    return;
+  }
+  const lines = [`🔎 「${q}」`];
+  if (tasks.length) lines.push("", "任务 · Tasks", ...tasks.map((t) => `${t.done ? "✓" : "○"} ${t.title}${t.date ? ` · ${t.date}` : " · inbox"}`));
+  if (goals.length) lines.push("", "目标 · Goals", ...goals.map((g) => goalLine(g, ctx.today)));
+  await ctx.send({
+    text: lines.join("\n"),
+    reply_markup: {
+      inline_keyboard: [
+        ...tasks.filter((t) => !t.done).slice(0, 6).map((t) => [{ text: `✓ ${shortTitle(t.title)}`, callback_data: cb.taskDone(t.id) }]),
+        ...goals.filter((g) => g.status !== "completed").slice(0, 4).map((g) => [{ text: `🎯 ${shortTitle(g.title)} ${g.progress}%`, callback_data: cb.goal(g.id, "view") }]),
+      ],
+    },
+  });
+}

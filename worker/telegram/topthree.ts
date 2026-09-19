@@ -14,9 +14,9 @@
 
 import { updateDay } from "../days.ts";
 import { guideChat } from "../guide.ts";
-import { proposalLabelText } from "../../shared/proposals.ts";
-import type { GuideProposal } from "../../shared/types.ts";
 import { cb, shiftDate, type CallbackContext, type TopThreeAction } from "./callback.ts";
+import { logReply } from "./events.ts";
+import { guideReplyCard } from "./guide.ts";
 import type { Reply } from "./router.ts";
 
 /** How long a reply still counts as the answer. */
@@ -45,8 +45,8 @@ async function loadState(ctx: Pick<TopThreeContext, "state">): Promise<TopThreeS
   return isTopThreeState(s) ? s : null;
 }
 
-/** The answer is in: stop waiting, but only if the slot is still ours for that date. */
-async function clearIfWaitingOn(ctx: Pick<TopThreeContext, "state">, date: string): Promise<void> {
+/** The answer is in (typed, copied, or a Guide proposal approved): stop waiting, but only if the slot is still ours for that date. */
+export async function clearTopThreeWait(ctx: Pick<TopThreeContext, "state">, date: string): Promise<void> {
   if ((await loadState(ctx))?.date === date) await ctx.state.clear();
 }
 
@@ -157,6 +157,7 @@ export async function topThreeAnswer(ctx: TopThreeContext, text: string): Promis
   }
   await writeTopThree(ctx, state.date, items);
   await ctx.state.clear();
+  await logReply(ctx.db, ctx.userId, "morning", state.date);
   await ctx.send(echoCard(ctx, state.date, items, total));
   return true;
 }
@@ -202,13 +203,14 @@ async function copyYesterday(ctx: CallbackContext, date: string): Promise<string
   const items = y ? [1, 2, 3].filter((i) => !y[`top${i}_done`]).map((i) => String(y[`top${i}`] ?? "").trim()).filter(Boolean) : [];
   if (!items.length) return "昨天没有未完成的三件事 · Nothing left over from yesterday";
   await writeTopThree(ctx, date, items);
-  await clearIfWaitingOn(ctx, date);
+  await clearTopThreeWait(ctx, date);
   await ctx.edit(echoCard(ctx, date, items));
   return "已抄昨天 · Copied from yesterday";
 }
 
-/** 🤖 让道引拟 — one Guide turn with a synthesized prompt; its set_top_three proposal becomes an Approve button. */
+/** 🤖 让道引拟 — one Guide turn with a synthesized prompt; its set_top_three proposal comes back with Approve buttons (guide.ts). */
 async function guideDraft(ctx: CallbackContext, date: string): Promise<string> {
+  await ctx.typing();
   const prompt = `Draft my top three outcomes for ${date}, drawn from my goals and this week's plan. `
     + `Keep the reply to a sentence or two and include exactly one set_top_three proposal for ${date}.`;
   let reply: Awaited<ReturnType<typeof guideChat>>;
@@ -217,47 +219,11 @@ async function guideDraft(ctx: CallbackContext, date: string): Promise<string> {
   } catch {
     return "道引暂时不可用 · Guide is unavailable right now";
   }
-  const idx = reply.proposals.findIndex((p) => p?.kind === "set_top_three");
-  const text = reply.text.slice(0, 3000);
-  if (idx < 0) {
-    await ctx.send({ text: `${text}\n\n（道引没有给出草案，可直接回复三件事 · No draft this time — reply with your three）` });
+  const messageId = await ctx.sendId(guideReplyCard(reply));
+  await ctx.db.prepare("UPDATE guide_messages SET tg_message_id = ? WHERE id = ? AND user_id = ?").bind(messageId, reply.id, ctx.userId).run();
+  if (!reply.proposals.some((p) => p?.kind === "set_top_three")) {
+    await ctx.send({ text: "（道引没有给出草案，可直接回复三件事 · No draft this time — reply with your three）" });
     return "没有草案 · No draft";
   }
-  await ctx.send({
-    text: `${text}\n\n${proposalLabelText(reply.proposals[idx])}`,
-    reply_markup: {
-      inline_keyboard: [[
-        { text: "✓ 采用 Approve", callback_data: cb.proposal(reply.id, idx, true) },
-        { text: "✗ 不用", callback_data: cb.proposal(reply.id, idx, false) },
-      ]],
-    },
-  });
   return "道引已拟 · Drafted";
-}
-
-/**
- * pr:<msgId>:<idx>:<y|n> — answer one proposal of a stored Guide message. Only set_top_three is applied
- * here; the other kinds land with #22. The message is re-read by id AND user_id, so a forged id changes nothing.
- */
-export async function proposalAnswer(ctx: CallbackContext, msgId: number, idx: number, approve: boolean): Promise<string> {
-  const row = await ctx.db.prepare("SELECT proposals FROM guide_messages WHERE id = ? AND user_id = ? AND role = 'assistant'")
-    .bind(msgId, ctx.userId).first<{ proposals: string | null }>();
-  let p: GuideProposal | undefined;
-  try {
-    p = row?.proposals ? (JSON.parse(row.proposals) as GuideProposal[])[idx] : undefined;
-  } catch {
-    p = undefined;
-  }
-  if (!p) return "找不到这条提议 · Proposal not found";
-  if (!approve) {
-    await ctx.finish(`${proposalLabelText(p)}\n— 不用 · Dismissed`);
-    return "已忽略 · Dismissed";
-  }
-  if (p.kind !== "set_top_three") return "尚未支持 · Not available yet";
-  const items = Array.isArray(p.outcomes) ? p.outcomes.map((o) => String(o).trim()).filter(Boolean).slice(0, 3) : [];
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(p.date ?? "") || !items.length) return "这条提议不完整 · Proposal is incomplete";
-  await writeTopThree(ctx, p.date, items);
-  await clearIfWaitingOn(ctx, p.date);
-  await ctx.finish(`✓ 已采用 · Approved\n${echoText(ctx, p.date, items)}`);
-  return "已采用 · Approved";
 }
