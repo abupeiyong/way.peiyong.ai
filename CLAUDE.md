@@ -19,6 +19,7 @@ npx wrangler secret put OPENAI_API_KEY --name way   # optional: upgrade Guide fr
 npx wrangler secret put TELEGRAM_WEBHOOK_SECRET --name way   # then setWebhook with the same secret_token (see worker/telegram/webhook.ts)
 TELEGRAM_WEBHOOK_SECRET=... npm run telegram:setup   # after a deploy: installs the bot's / command menu (POST /api/telegram/setup)
 npm run check:telegram      # unit-ish checks for worker/telegram/api.ts (esc, callback_data, 4096 guard, 403/429 results); fetch is stubbed
+curl "http://localhost:5174/cdn-cgi/handler/scheduled"   # fire one cron tick (runSchedules) under `npm run dev`; /__scheduled is wrangler-dev only
 ```
 
 - Local dev has **no Workers AI binding** (`wrangler.dev.jsonc` omits `ai`), so `/api/guide/chat` returns 502 locally unless you put `OPENAI_API_KEY=...` in a gitignored `.dev.vars`.

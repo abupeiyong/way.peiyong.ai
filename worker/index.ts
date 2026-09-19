@@ -969,7 +969,7 @@ app.onError((err, c) => {
   return c.text("Internal Server Error", 500);
 });
 
-// Cron ticks (Telegram scheduler). No trigger is configured in wrangler.jsonc until the telegram_* migration lands.
+// Cron ticks (Telegram scheduler): "triggers.crons" in wrangler.jsonc / wrangler.dev.jsonc, every 5 minutes.
 export default {
   fetch: app.fetch,
   scheduled(controller, env, ctx) {

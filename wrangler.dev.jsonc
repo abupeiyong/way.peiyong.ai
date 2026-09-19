@@ -17,6 +17,8 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Telegram scheduler tick (worker/telegram/schedule.ts → runSchedules). Locally (vite plugin): curl "http://localhost:5174/cdn-cgi/handler/scheduled".
+  "triggers": { "crons": ["*/5 * * * *"] },
   "ratelimits": [
     // PRD §11.2: 5 attempts per IP per minute across /api/auth/*; 10 bot messages per user per minute.
     // namespace_id is an arbitrary integer, unique per Cloudflare account.
