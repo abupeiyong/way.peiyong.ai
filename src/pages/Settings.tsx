@@ -10,11 +10,14 @@ import { QrCode } from "../components/QrCode.tsx";
 export default function Settings() {
   const { user, nav, refreshUser } = useApp();
   const [name, setName] = useState(user.name);
+  // "" = UTC (users.timezone NULL).
+  const [timezone, setTimezone] = useState(user.timezone ?? "");
   const [areas, setAreas] = useState<Area[]>([]);
   const [newArea, setNewArea] = useState("");
   const [refineOpen, setRefineOpen] = useState(false);
   const [directionDraft, setDirectionDraft] = useState("");
   const [savedNote, setSavedNote] = useState(false);
+  const [profileError, setProfileError] = useState("");
   // null = not loaded (or unavailable): the Security card stays hidden.
   const [security, setSecurity] = useState<SecuritySettings | null>(null);
   const [confirmDisable, setConfirmDisable] = useState(false);
@@ -22,13 +25,16 @@ export default function Settings() {
 
   // null = not loaded (or unavailable): the Telegram card stays hidden.
   const [telegram, setTelegram] = useState<TelegramSettings | null>(null);
-  const [tgDraft, setTgDraft] = useState<TelegramPrefs & { timezone: string }>();
+  const [tgDraft, setTgDraft] = useState<TelegramPrefs>();
   const [tgNote, setTgNote] = useState("");
   const [tgError, setTgError] = useState("");
   const [confirmUnlink, setConfirmUnlink] = useState(false);
   // The link in progress (deep link + QR) and where the bot says it stands.
   const [link, setLink] = useState<TelegramLinkStart | null>(null);
   const [linkState, setLinkState] = useState<TelegramLinkStatus["state"]>("pending");
+
+  // The "use this browser's zone" banner can change it while this page is open.
+  useEffect(() => { setTimezone(user.timezone ?? ""); }, [user.timezone]);
 
   const loadAreas = () => api.get<{ areas: Area[] }>("/api/goals").then((r) => setAreas(r.areas));
   useEffect(() => { loadAreas(); }, []);
@@ -40,7 +46,7 @@ export default function Settings() {
     api.get<{ telegram: TelegramSettings }>("/api/telegram")
       .then((r) => {
         setTelegram(r.telegram);
-        setTgDraft({ ...r.telegram.prefs, timezone: r.telegram.timezone ?? "" });
+        setTgDraft(r.telegram.prefs);
       })
       .catch(() => setTelegram(null));
   useEffect(() => { loadTelegram(); }, []);
@@ -89,8 +95,7 @@ export default function Settings() {
 
   const saveTelegram = () => telegramAction("已存", async () => {
     if (!tgDraft) return;
-    const { timezone, ...prefs } = tgDraft;
-    await api.put("/api/telegram/prefs", { ...prefs, timezone: timezone || null });
+    await api.put("/api/telegram/prefs", tgDraft);
     await loadTelegram();
   });
 
@@ -117,7 +122,13 @@ export default function Settings() {
   };
 
   const saveProfile = async () => {
-    await api.put("/api/me", { name });
+    setProfileError("");
+    try {
+      await api.put("/api/me", { name, timezone: timezone || null });
+    } catch (err) {
+      setProfileError(err instanceof Error ? err.message : "Could not save.");
+      return;
+    }
     await refreshUser();
     setSavedNote(true);
     setTimeout(() => setSavedNote(false), 1600);
@@ -162,8 +173,19 @@ export default function Settings() {
             <input className="input" value={user.email} disabled style={{ opacity: 0.6 }} />
           </div>
           <div>
+            <label className="field-label">时区 Time zone</label>
+            <select className="input" value={timezone} onChange={(e) => setTimezone(e.target.value)}>
+              <option value="">UTC (default)</option>
+              {timeZones(timezone).map((z) => <option key={z} value={z}>{z}</option>)}
+            </select>
+            <p className="muted mini" style={{ marginTop: 4 }}>
+              决定「今天」从何时开始，以及复盘与提醒的时间。Sets when “today” begins for reviews, insights, the Guide and reminders.
+            </p>
+          </div>
+          <div>
             <button className="btn" onClick={saveProfile}>Save profile</button>
           </div>
+          {profileError && <p className="small" style={{ color: "var(--red)" }}>{profileError}</p>}
         </div>
       </div>
 
@@ -313,14 +335,6 @@ export default function Settings() {
                          onChange={(e) => setTgDraft({ ...tgDraft, quiet_to: e.target.value || null })} />
                 </div>
               </div>
-              <div>
-                <label className="field-label">时区 Time zone</label>
-                <select className="input" value={tgDraft.timezone}
-                        onChange={(e) => setTgDraft({ ...tgDraft, timezone: e.target.value })}>
-                  <option value="">UTC (default)</option>
-                  {timeZones(tgDraft.timezone).map((z) => <option key={z} value={z}>{z}</option>)}
-                </select>
-              </div>
               <label className="row small" style={{ cursor: "pointer" }}>
                 <button type="button" className={`checkbox${tgDraft.nudges ? " checked" : ""}`} aria-label="Toggle nudges"
                         onClick={() => setTgDraft({ ...tgDraft, nudges: tgDraft.nudges ? 0 : 1 })}>
@@ -328,7 +342,10 @@ export default function Settings() {
                 </button>
                 提醒 · Nudges during the day
               </label>
-              <p className="muted mini">留空即关闭。Leave a time empty to turn it off.</p>
+              <p className="muted mini">
+                留空即关闭。时间按档案里的时区（{user.timezone || "UTC"}）。<br />
+                Leave a time empty to turn it off. Times are in your profile time zone ({user.timezone || "UTC"}).
+              </p>
               <div>
                 <button className="btn" onClick={saveTelegram}>Save Telegram settings</button>
               </div>

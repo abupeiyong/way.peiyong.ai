@@ -25,6 +25,9 @@ import { sendMorning } from "./compose.ts";
 import { startReview } from "./review.ts";
 import { d1StateStore } from "./state.ts";
 import type { TopThreeContext } from "./topthree.ts";
+import { localNow, type LocalNow } from "./time.ts";
+
+export { localDate, localNow, localTime, localWeekday, type LocalNow } from "./time.ts";
 
 export interface ScheduleEnv {
   DB: D1Database;
@@ -44,40 +47,6 @@ export function isDisconnected(pausedUntil: string | null | undefined): boolean 
 }
 
 // ---------- local time ----------
-
-export interface LocalNow {
-  /** YYYY-MM-DD */
-  date: string;
-  /** HH:MM, 24 h */
-  time: string;
-  /** Minutes since local midnight. */
-  minutes: number;
-  /** 0 = Sunday … 6 = Saturday */
-  weekday: number;
-}
-
-const WEEKDAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-
-/** The wall clock in `timeZone` at `at`. Throws RangeError on an unknown zone. */
-export function localNow(timeZone: string, at: Date): LocalNow {
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-US", {
-      timeZone, year: "numeric", month: "2-digit", day: "2-digit",
-      hour: "2-digit", minute: "2-digit", hourCycle: "h23", weekday: "short",
-    }).formatToParts(at).map((p) => [p.type, p.value])
-  );
-  const time = `${parts.hour}:${parts.minute}`;
-  return {
-    date: `${parts.year}-${parts.month}-${parts.day}`,
-    time,
-    minutes: Number(parts.hour) * 60 + Number(parts.minute),
-    weekday: WEEKDAY_INDEX[parts.weekday],
-  };
-}
-
-export const localDate = (timeZone: string, at: Date) => localNow(timeZone, at).date;
-export const localTime = (timeZone: string, at: Date) => localNow(timeZone, at).time;
-export const localWeekday = (timeZone: string, at: Date) => localNow(timeZone, at).weekday;
 
 /** 'HH:MM' (or 'HH:MM:SS') → minutes since midnight; null when unset or malformed. */
 function slotMinutes(v: unknown): number | null {

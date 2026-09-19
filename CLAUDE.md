@@ -36,7 +36,7 @@ curl "http://localhost:5174/cdn-cgi/handler/scheduled"   # fire one cron tick (r
 - Auth middleware on `/api/*` (except `/api/auth/*`) resolves the `way_session` cookie against the `sessions` table and sets `c.get("userId")`. **Every SQL statement is scoped by `user_id`**; keep it that way.
 - Passwords are PBKDF2-SHA256 via Web Crypto (`worker/auth.ts`), sessions are D1 rows with a 30-day expiry. No JWT, no external auth.
 - Partial updates use a whitelist + per-field `UPDATE` loop (`DAY_FIELDS`, `TASK_FIELDS`). Adding a column means: migration + whitelist entry + `shared/types.ts` field.
-- Dates are `YYYY-MM-DD` strings everywhere, validated by `assertDate`. Server-side date math is UTC (`weekStartOf`, `periodRange`, `reviewPeriodStart`); client-side `todayStr()`/`addDays()` in `src/api.ts` use local time. Weeks start on Monday.
+- Dates are `YYYY-MM-DD` strings everywhere, validated by `assertDate`. Server-side date math is plain calendar arithmetic on those strings (`weekStartOf`, `periodRange`, `reviewPeriodStart`); when the server has to pick "today" itself (`/api/reviews`, `/api/insights`, `guideContext`, the Telegram scheduler/bot) it uses `users.timezone` (IANA, NULL = UTC) via `worker/telegram/time.ts`; client-side `todayStr()`/`addDays()` in `src/api.ts` use local time. Weeks start on Monday.
 - Tasks: `inbox=1` = unscheduled; `start_min`/`end_min` are minutes from midnight for the schedule grid; repeating tasks (`repeat` daily/weekly) are materialized into concrete rows (`repeat_src` → source id) lazily inside `GET /api/day`; carry-over of past undone tasks is `POST /api/carry` with `forward` (bumps `carried`) or `drop` (sets `dropped=1`).
 - Register seeds the nine `DEFAULT_AREAS` for the new user.
 

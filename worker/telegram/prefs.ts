@@ -6,6 +6,7 @@
 // users.timezone (IANA; NULL = UTC).
 
 import { BadInput, coerceFields, flag, type Coerce, type FieldSpecs } from "../validate.ts";
+import { normalizeTimeZone } from "./time.ts";
 
 /** 'HH:MM' (24 h) or null = off. */
 const hhmmOrNull: Coerce = (v, f) => {
@@ -21,12 +22,8 @@ export const TELEGRAM_PREF_FIELDS: FieldSpecs = {
 /** An IANA zone the runtime knows, or null (= UTC). Throws BadInput otherwise. */
 export function timezoneOrNull(v: unknown): string | null {
   if (v === null || v === "") return null;
-  if (typeof v === "string") {
-    try {
-      new Intl.DateTimeFormat("en-US", { timeZone: v });
-      return v;
-    } catch { /* fall through */ }
-  }
+  const zone = typeof v === "string" ? normalizeTimeZone(v) : null;
+  if (zone) return zone;
   throw new BadInput("timezone must be an IANA time zone (e.g. Asia/Dubai) or null");
 }
 
