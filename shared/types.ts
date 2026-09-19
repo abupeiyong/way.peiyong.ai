@@ -11,6 +11,25 @@ export interface User {
   email: string;
   name: string;
   direction: string;
+  /** users.timezone (IANA); null = UTC. */
+  timezone: string | null;
+  /** users.password_login_disabled: only Telegram can sign in to this account. */
+  password_login_disabled: boolean;
+}
+
+/** A telegram_accounts row: the Telegram identity linked to one Way account. */
+export interface TelegramAccount {
+  user_id: number;
+  /** Telegram's from.id; UNIQUE, so one Telegram identity links to at most one Way account. */
+  telegram_user_id: number;
+  chat_id: number;
+  username: string | null;
+  first_name: string | null;
+  /** 0/1: a Telegram sign-in has succeeded at least once. */
+  verified_login: number;
+  /** SQLite datetime(); nothing is sent before it. '9999-12-31 23:59:59' = the bot was blocked. */
+  paused_until: string | null;
+  created_at: string;
 }
 
 /** GET /api/security. */
