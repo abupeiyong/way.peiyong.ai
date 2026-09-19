@@ -1,11 +1,15 @@
 import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
-import { hashPassword, verifyPassword, newSessionToken, sessionCookie, underLimit, SESSION_COOKIE, SESSION_DAYS } from "./auth.ts";
+import {
+  hashPassword, verifyPassword, newSessionToken, sessionCookie, pendingCookie, underLimit,
+  PENDING_COOKIE, SESSION_COOKIE, SESSION_DAYS,
+} from "./auth.ts";
 import { guideChat } from "./guide.ts";
 import { carryOver, deleteTask, materializeRepeats, updateTask } from "./tasks.ts";
 import { updateDay } from "./days.ts";
 import { upsertReview, type ReviewInput } from "./reviews.ts";
+import { issueOtp, redeemOtp, OTP_TTL_SECONDS } from "./telegram/otp.ts";
 import { runSchedules } from "./telegram/schedule.ts";
 import { BadInput, coerceFields, dateOrNull, idOrNull, int, nonEmptyText, oneOf, text, type FieldSpecs } from "./validate.ts";
 import type { GoalLevel, GoalStatus, GoalType, GuideProposal, Priority, ReviewPeriod, SecuritySettings } from "../shared/types.ts";
@@ -150,6 +154,38 @@ app.post("/api/auth/logout", async (c) => {
   const token = getCookie(c, SESSION_COOKIE);
   if (token) await c.env.DB.prepare("DELETE FROM sessions WHERE token = ?").bind(token).run();
   c.header("Set-Cookie", sessionCookie("", 0));
+  return c.json({ ok: true });
+});
+
+// Telegram code sign-in (PRD §5.2(c)). Every request gets the same answer and a fresh way_pending cookie;
+// the lookup and send run after the response, so neither content nor timing reveals whether the email is linked.
+app.post("/api/auth/telegram/otp", async (c) => {
+  const { email } = await c.req.json<{ email?: unknown }>();
+  if (typeof email !== "string" || !email.includes("@")) return c.json({ error: "Enter the email of your Way account." }, 400);
+  const browserToken = newSessionToken();
+  c.executionCtx.waitUntil(
+    issueOtp(c.env.DB, c.env.TELEGRAM_BOT_TOKEN, email.trim().toLowerCase(), browserToken)
+      .catch((e) => console.error("telegram otp: issue failed", e))
+  );
+  c.header("Set-Cookie", pendingCookie(browserToken, OTP_TTL_SECONDS));
+  return c.json({ ok: true });
+});
+
+app.post("/api/auth/telegram/verify", async (c) => {
+  const { code } = await c.req.json<{ code?: unknown }>();
+  const browserToken = getCookie(c, PENDING_COOKIE);
+  const userId = browserToken && typeof code === "string" ? await redeemOtp(c.env.DB, browserToken, code) : null;
+  if (!userId) return c.json({ error: "That code is wrong or has expired. Check Telegram or request a new one." }, 401);
+
+  const token = newSessionToken();
+  const expires = new Date(Date.now() + SESSION_DAYS * 86400_000).toISOString();
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)").bind(token, userId, expires),
+    // A Telegram sign-in has now succeeded, which is what lets the user switch password sign-in off.
+    c.env.DB.prepare("UPDATE telegram_accounts SET verified_login = 1 WHERE user_id = ?").bind(userId),
+  ]);
+  c.header("Set-Cookie", sessionCookie(token, SESSION_DAYS * 86400));
+  c.header("Set-Cookie", pendingCookie("", 0), { append: true });
   return c.json({ ok: true });
 });
 

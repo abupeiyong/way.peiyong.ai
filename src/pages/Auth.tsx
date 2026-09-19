@@ -11,13 +11,31 @@ export default function AuthPage({ mode, nav, onAuthed }: {
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  // Sign in with a Telegram code (login only): enter email → code sent to the linked chat → enter code.
+  const [viaTelegram, setViaTelegram] = useState(false);
+  const [codeSent, setCodeSent] = useState(false);
+  const [code, setCode] = useState("");
+  const telegram = mode === "login" && viaTelegram;
+
+  const switchMethod = (toTelegram: boolean) => {
+    setViaTelegram(toTelegram);
+    setCodeSent(false);
+    setCode("");
+    setError("");
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setError("");
     try {
-      if (mode === "login") await api.post("/api/auth/login", { email, password });
+      if (telegram && !codeSent) {
+        await api.post("/api/auth/telegram/otp", { email });
+        setCodeSent(true);
+        return;
+      }
+      if (telegram) await api.post("/api/auth/telegram/verify", { code });
+      else if (mode === "login") await api.post("/api/auth/login", { email, password });
       else await api.post("/api/auth/register", { email, password, name });
       await onAuthed();
     } catch (err) {
@@ -44,17 +62,44 @@ export default function AuthPage({ mode, nav, onAuthed }: {
               <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="How should Way call you?" />
             </div>
           )}
-          <div>
-            <label className="field-label">Email</label>
-            <input className="input" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
-          </div>
-          <div>
-            <label className="field-label">Password</label>
-            <input className="input" type="password" required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
-          </div>
+          {telegram && codeSent ? (
+            <>
+              <p className="auth-note">
+                If <b>{email}</b> is linked to Telegram, the Way bot has just sent you a 6-digit code. It works once, in this browser, for 5 minutes.
+              </p>
+              <div>
+                <label className="field-label">Code</label>
+                <input
+                  className="input auth-code" required autoFocus inputMode="numeric" autoComplete="one-time-code"
+                  pattern="\d{3} ?\d{3}" maxLength={7} value={code} onChange={(e) => setCode(e.target.value)} placeholder="418 233"
+                />
+              </div>
+            </>
+          ) : (
+            <div>
+              <label className="field-label">Email</label>
+              <input className="input" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
+            </div>
+          )}
+          {!telegram && (
+            <div>
+              <label className="field-label">Password</label>
+              <input className="input" type="password" required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+            </div>
+          )}
           <button className="btn" disabled={busy} type="submit">
-            {mode === "login" ? "Sign in" : "Create account"}
+            {mode === "register" ? "Create account" : telegram && !codeSent ? "Send code to Telegram" : "Sign in"}
           </button>
+          {mode === "login" && (
+            <p className="auth-switch">
+              {telegram && codeSent && (
+                <><a href="#" onClick={(e) => { e.preventDefault(); switchMethod(true); }}>Use another email or resend</a> · </>
+              )}
+              <a href="#" onClick={(e) => { e.preventDefault(); switchMethod(!telegram); }}>
+                {telegram ? "Use password instead" : "Telegram 验证码 · Sign in with a Telegram code"}
+              </a>
+            </p>
+          )}
         </form>
         <p className="auth-alt">
           {mode === "login" ? (

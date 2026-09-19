@@ -151,7 +151,7 @@ export class TelegramApiError extends Error {
 /** A 429 asked for a longer wait than MAX_BACKOFF_MS; the send is left for the next tick. */
 class Deferred extends Error {}
 
-async function sendMessage(token: string, chatId: number | string, reply: Reply): Promise<void> {
+export async function sendMessage(token: string, chatId: number | string, reply: Reply): Promise<void> {
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
