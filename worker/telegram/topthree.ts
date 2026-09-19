@@ -4,11 +4,13 @@
 //   tt:y:<date>        → copy yesterday's top1..3, skipping the ones marked done
 //   tt:g:<date>        → ask the Guide for a draft; its set_top_three proposal comes back as [✓ 采用] (pr:<msg>:<idx>:y)
 //   tt:r:<date>        → ask again for that date
+//   tt:w:<date>        → ✍️ 写三件事 on the morning message: a one-line follow-up carrying ForceReply
 // Writes go through updateDay — the same path as PUT /api/day/:date { top1, top2, top3 }.
 // The answer window is 4 h; a later reply is told the prompt expired and falls through to inbox capture.
 //
-// Webhook wiring (#6/#15): the morning message and the /plan command call askTopThree; the router's
-// pendingState handler calls topThreeAnswer (after reviewAnswer — each only takes its own state kind).
+// Webhook wiring (#6/#20): the /plan command calls askTopThree (the morning message, compose.ts, embeds
+// askText and calls awaitTopThree itself); the router's pendingState handler calls topThreeAnswer
+// (after reviewAnswer — each only takes its own state kind).
 
 import { updateDay } from "../days.ts";
 import { guideChat } from "../guide.ts";
@@ -84,9 +86,14 @@ function when(ctx: Pick<TopThreeContext, "today">, date: string): string {
   return date === ctx.today ? "今天" : date === shiftDate(ctx.today, 1) ? "明天" : date;
 }
 
+/** The ask itself; also the closing block of the morning message. */
+export function askText(ctx: Pick<TopThreeContext, "today">, date: string): string {
+  return `🎯 ${when(ctx, date)}最重要的三件事是什么？\nWhat are the top three for ${date}?\n\n直接回复，一行一件 · Reply with one per line`;
+}
+
 function askCard(ctx: Pick<TopThreeContext, "today">, date: string): Reply {
   return {
-    text: `🎯 ${when(ctx, date)}最重要的三件事是什么？\nWhat are the top three for ${date}?\n\n直接回复，一行一件 · Reply with one per line`,
+    text: askText(ctx, date),
     reply_markup: {
       inline_keyboard: [[
         { text: "📋 抄昨天", callback_data: cb.topThree("copy", date) },
@@ -119,10 +126,15 @@ async function writeTopThree(ctx: Pick<TopThreeContext, "db" | "userId">, date: 
 
 // ---------- entry points ----------
 
-/** The morning message and /plan: ask for the day's top three and wait 4 h for the reply. */
-export async function askTopThree(ctx: TopThreeContext, date = ctx.today): Promise<void> {
+/** Open (or reopen) the 4 h answer window for `date`: the next free text becomes its top three. */
+export async function awaitTopThree(ctx: Pick<TopThreeContext, "state">, date: string): Promise<void> {
   const state: TopThreeState = { kind: "awaiting_top_three", date, expires_at: Date.now() + TOP_THREE_ANSWER_SECONDS * 1000 };
   await ctx.state.put(state, TOP_THREE_SLOT_SECONDS);
+}
+
+/** /plan (and ✏️ 重写): ask for the day's top three and wait 4 h for the reply. */
+export async function askTopThree(ctx: TopThreeContext, date = ctx.today): Promise<void> {
+  await awaitTopThree(ctx, date);
   await ctx.send(askCard(ctx, date));
 }
 
@@ -151,9 +163,10 @@ export async function topThreeAnswer(ctx: TopThreeContext, text: string): Promis
 
 // ---------- button handlers (dispatched by handleCallback) ----------
 
-/** tt:<r|y|g>:<date> */
+/** tt:<r|y|g|w>:<date> */
 export async function topThreeButton(ctx: CallbackContext, action: TopThreeAction, date: string): Promise<string> {
   if (action === "rewrite") return rewrite(ctx, date);
+  if (action === "write") return writePrompt(ctx, date);
   if (action === "copy") return copyYesterday(ctx, date);
   return guideDraft(ctx, date);
 }
@@ -166,6 +179,19 @@ async function rewrite(ctx: CallbackContext, date: string): Promise<string> {
   if (items.length) await ctx.finish(echoText(ctx, date, items));
   await askTopThree(ctx, date);
   return "请重新回复 · Reply with the new three";
+}
+
+/**
+ * ✍️ 写三件事 — the morning message keeps its inline keyboard, so it cannot also carry ForceReply;
+ * this one-line follow-up opens the reply field on demand. The window is reopened so a late tap still works.
+ */
+async function writePrompt(ctx: CallbackContext, date: string): Promise<string> {
+  await awaitTopThree(ctx, date);
+  await ctx.send({
+    text: `✍️ ${when(ctx, date)}的三件事，一行一件 · Your top three, one per line`,
+    reply_markup: { force_reply: true, input_field_placeholder: "一行一件 · One per line" },
+  });
+  return "请直接回复 · Reply below";
 }
 
 /** 📋 抄昨天 — yesterday's top1..3 that are not done. Absolute, so a replay writes the same thing. */

@@ -47,9 +47,16 @@ export interface InlineKeyboardMarkup {
   inline_keyboard: InlineKeyboardButton[][];
 }
 
+/** Opens the reply keyboard on the client. A message carries this or an inline keyboard, never both. */
+export interface ForceReply {
+  force_reply: true;
+  /** Up to 64 characters. */
+  input_field_placeholder?: string;
+}
+
 export interface Reply {
   text: string;
-  reply_markup?: InlineKeyboardMarkup;
+  reply_markup?: InlineKeyboardMarkup | ForceReply;
 }
 
 // ---------- routing ----------
