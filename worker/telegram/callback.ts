@@ -3,7 +3,7 @@
 // ever carries short opaque verbs and ids — never free text — and every handler
 // re-checks ownership against the user resolved from the chat, not from the data.
 
-import { carryOver } from "../tasks.ts";
+import { carryOver, deleteTask, updateTask } from "../tasks.ts";
 
 export const CALLBACK_DATA_MAX_BYTES = 64;
 
@@ -15,6 +15,9 @@ export type RatingField = (typeof RATING_FIELDS)[number];
 type Num = number | string;
 type TaskDone<Id extends Num> = `t:${Id}:d`;
 type TaskSchedule<Id extends Num, Days extends Num> = `t:${Id}:s:${Days}`;
+type TaskLinkGoal<Id extends Num> = `t:${Id}:g`;
+type TaskAskGuide<Id extends Num> = `t:${Id}:a`;
+type TaskDelete<Id extends Num> = `t:${Id}:x`;
 type ActualMin<Id extends Num, Min extends Num> = `am:${Id}:${Min}`;
 type Rating<F extends RatingField, N extends Num> = `rt:${F}:${N}`;
 type ReviewStep = "rv:next" | "rv:skip";
@@ -25,6 +28,9 @@ type ProposalAnswer<MsgId extends Num, Idx extends Num> = `pr:${MsgId}:${Idx}:${
 export type Callback =
   | { verb: "task_done"; taskId: number }
   | { verb: "task_schedule"; taskId: number; offsetDays: number }
+  | { verb: "task_link_goal"; taskId: number }
+  | { verb: "task_ask_guide"; taskId: number }
+  | { verb: "task_delete"; taskId: number }
   | { verb: "actual_min"; taskId: number; min: number }
   | { verb: "rating"; field: RatingField; n: number }
   | { verb: "review"; step: "next" | "skip" }
@@ -41,7 +47,7 @@ const MAX_PROPOSAL_IDX = 99;
 // so characters = bytes). Changing a format to something longer fails `npm run typecheck`.
 type MaxId = "9007199254740991"; // Number.MAX_SAFE_INTEGER — the largest id parseCallback accepts
 type Widest =
-  | TaskDone<MaxId> | TaskSchedule<MaxId, "365"> | ActualMin<MaxId, "1440"> | Rating<RatingField, "5">
+  | TaskDone<MaxId> | TaskSchedule<MaxId, "365"> | TaskLinkGoal<MaxId> | TaskAskGuide<MaxId> | TaskDelete<MaxId> | ActualMin<MaxId, "1440"> | Rating<RatingField, "5">
   | ReviewStep | Carry | GoalProgress<MaxId, "100"> | ProposalAnswer<MaxId, "99">;
 type Budget<N extends number, T extends 0[] = []> = T["length"] extends N ? T : Budget<N, [...T, 0]>;
 type Fits<S extends string, B extends 0[]> = S extends `${infer _}${infer Rest}`
@@ -75,6 +81,9 @@ export function parseCallback(data: string): Callback | null {
       const taskId = toId(p[1]);
       if (taskId === null) return null;
       if (p.length === 3 && p[2] === "d") return { verb: "task_done", taskId };
+      if (p.length === 3 && p[2] === "g") return { verb: "task_link_goal", taskId };
+      if (p.length === 3 && p[2] === "a") return { verb: "task_ask_guide", taskId };
+      if (p.length === 3 && p[2] === "x") return { verb: "task_delete", taskId };
       const offsetDays = toInt(p[3], 0, MAX_OFFSET_DAYS);
       if (p.length === 4 && p[2] === "s" && offsetDays !== null) return { verb: "task_schedule", taskId, offsetDays };
       return null;
@@ -116,6 +125,9 @@ export const cb = {
   taskDone: (taskId: number): TaskDone<number> => checked(`t:${taskId}:d` as const),
   taskSchedule: (taskId: number, offsetDays: number): TaskSchedule<number, number> =>
     checked(`t:${taskId}:s:${offsetDays}` as const),
+  taskLinkGoal: (taskId: number): TaskLinkGoal<number> => checked(`t:${taskId}:g` as const),
+  taskAskGuide: (taskId: number): TaskAskGuide<number> => checked(`t:${taskId}:a` as const),
+  taskDelete: (taskId: number): TaskDelete<number> => checked(`t:${taskId}:x` as const),
   actualMin: (taskId: number, min: number): ActualMin<number, number> => checked(`am:${taskId}:${min}` as const),
   rating: (field: RatingField, n: number): Rating<RatingField, number> => checked(`rt:${field}:${n}` as const),
   review: (step: "next" | "skip"): ReviewStep => checked(`rv:${step}` as const),
@@ -147,6 +159,8 @@ export async function handleCallback(ctx: CallbackContext, data: string): Promis
     const parsed = parseCallback(data);
     if (!parsed) toast = "无效按钮 · Invalid button";
     else if (parsed.verb === "task_done") toast = await taskDone(ctx, parsed.taskId);
+    else if (parsed.verb === "task_schedule") toast = await taskSchedule(ctx, parsed.taskId, parsed.offsetDays);
+    else if (parsed.verb === "task_delete") toast = await taskDelete(ctx, parsed.taskId);
     else if (parsed.verb === "carry") toast = await carry(ctx, parsed.action);
     else toast = "尚未支持 · Not available yet"; // the remaining verbs land with their features
   } finally {
@@ -168,6 +182,31 @@ async function taskDone(ctx: CallbackContext, taskId: number): Promise<string> {
   if (!task) return "找不到这件事 · Task not found"; // unknown or another user's id: nothing changes
   await ctx.finish(`✓ 已完成 · Done\n${task.title}`);
   return "已经完成了 · Already done";
+}
+
+function shiftDate(date: string, days: number): string {
+  const d = new Date(date + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// Scheduling sets an absolute date (the user's local today + offset), so a replayed tap is a no-op.
+async function taskSchedule(ctx: CallbackContext, taskId: number, offsetDays: number): Promise<string> {
+  const date = shiftDate(ctx.today, offsetDays);
+  const task = await updateTask<{ title: string }>(ctx.db, ctx.userId, taskId, { date, inbox: 0 });
+  if (!task) return "找不到这件事 · Task not found";
+  const when = offsetDays === 0 ? "今天 · Today" : offsetDays === 1 ? "明天 · Tomorrow" : date;
+  await ctx.finish(`📅 已排到${when}\n${task.title}`);
+  return `已排到${when}`;
+}
+
+async function taskDelete(ctx: CallbackContext, taskId: number): Promise<string> {
+  const task = await ctx.db.prepare("SELECT title FROM tasks WHERE id = ? AND user_id = ?")
+    .bind(taskId, ctx.userId).first<{ title: string }>();
+  // Unknown, another user's, or already deleted by an earlier tap: nothing changes.
+  if (!task || (await deleteTask(ctx.db, ctx.userId, taskId)) === 0) return "找不到这件事 · Task not found";
+  await ctx.finish(`🗑 已删除 · Deleted\n${task.title}`);
+  return "已删除 · Deleted";
 }
 
 // Carrying is naturally idempotent: a second tap finds nothing left before today.
