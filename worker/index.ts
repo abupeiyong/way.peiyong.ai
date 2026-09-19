@@ -18,6 +18,7 @@ import {
 } from "./telegram/schedule.ts";
 import { d1StateStore } from "./telegram/state.ts";
 import { verifyWidgetLogin } from "./telegram/widget.ts";
+import { claimUpdate, handleUpdate, isUpdate, secretTokenOk, SECRET_HEADER } from "./telegram/webhook.ts";
 import { BadInput, coerceFields, dateOrNull, idOrNull, int, nonEmptyText, oneOf, text, type FieldSpecs } from "./validate.ts";
 import type {
   GoalLevel, GoalStatus, GoalType, GuideProposal, Priority, ReviewPeriod, SecuritySettings,
@@ -34,6 +35,8 @@ export interface Env {
   TELEGRAM_BOT_TOKEN?: string;
   /** The shared bot's @username, without the @. Unset = the login page shows no Telegram Login Widget. */
   TELEGRAM_BOT_USERNAME?: string;
+  /** The secret_token given to setWebhook (a Worker secret). Unset = every webhook request is refused. */
+  TELEGRAM_WEBHOOK_SECRET?: string;
   /** 5 attempts per IP per minute across /api/auth/* (wrangler `ratelimits`). */
   AUTH_LIMITER?: RateLimit;
   /** 10 bot messages per user per minute (wrangler `ratelimits`); see floodGuard in telegram/router.ts. */
@@ -232,8 +235,11 @@ app.post("/api/auth/telegram/widget", async (c) => {
   return c.json({ ok: true });
 });
 
+// Reachable without a session cookie. The webhook authenticates with its secret token instead (PRD §4.4).
+const PUBLIC = ["/api/auth/", "/api/telegram/webhook"];
+
 app.use("/api/*", async (c, next) => {
-  if (c.req.path.startsWith("/api/auth/")) return next();
+  if (PUBLIC.some((p) => c.req.path.startsWith(p))) return next();
   const token = getCookie(c, SESSION_COOKIE);
   if (token) {
     const row = await c.env.DB.prepare("SELECT user_id, expires_at FROM sessions WHERE token = ?")
@@ -410,6 +416,27 @@ app.post("/api/telegram/test", async (c) => {
     await db.prepare("UPDATE telegram_accounts SET paused_until = NULL WHERE user_id = ?").bind(userId).run();
   }
   return c.json({ ok: true });
+});
+
+// ---------- telegram webhook ----------
+// The bot's entry point (PRD §4.3–§4.5; the handling itself is in telegram/webhook.ts). Every outcome is an empty
+// 200: any other status makes Telegram retry, and a 401 would only tell a probe it found something.
+app.post("/api/telegram/webhook", async (c) => {
+  if (!secretTokenOk(c.env.TELEGRAM_WEBHOOK_SECRET, c.req.header(SECRET_HEADER))) {
+    console.warn("telegram webhook: bad secret token");
+    return c.body(null, 200);
+  }
+  try {
+    const update: unknown = await c.req.json().catch(() => null);
+    if (!isUpdate(update)) {
+      console.warn("telegram webhook: body is not an update");
+    } else if (await claimUpdate(c.env.DB, update.update_id)) {
+      c.executionCtx.waitUntil(handleUpdate(c.env, update, new URL(c.req.url).origin));
+    }
+  } catch (e) {
+    console.error("telegram webhook: failed", e);
+  }
+  return c.body(null, 200);
 });
 
 // ---------- day / tasks ----------
