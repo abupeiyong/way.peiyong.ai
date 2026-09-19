@@ -1,12 +1,14 @@
 import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
+import { HTTPException } from "hono/http-exception";
 import { hashPassword, verifyPassword, newSessionToken, sessionCookie, SESSION_COOKIE, SESSION_DAYS } from "./auth.ts";
 import { guideChat } from "./guide.ts";
 import { carryOver, deleteTask, materializeRepeats, updateTask } from "./tasks.ts";
 import { updateDay } from "./days.ts";
 import { upsertReview, type ReviewInput } from "./reviews.ts";
 import { runSchedules } from "./telegram/schedule.ts";
-import type { GoalLevel, GuideProposal, ReviewPeriod } from "../shared/types.ts";
+import { BadInput, coerceFields, dateOrNull, idOrNull, int, nonEmptyText, oneOf, text, type FieldSpecs } from "./validate.ts";
+import type { GoalLevel, GoalStatus, GoalType, GuideProposal, Priority, ReviewPeriod } from "../shared/types.ts";
 
 export interface Env {
   DB: D1Database;
@@ -249,8 +251,15 @@ app.get("/api/goals", async (c) => {
   return c.json({ areas: areas.results, goals: goals.results });
 });
 
-const GOAL_FIELDS = ["title", "description", "level", "type", "status", "area_id", "parent_id", "priority",
-  "start_date", "target_date", "progress", "confidence", "success_criteria", "motivation"] as const;
+const GOAL_TYPES: GoalType[] = ["outcome", "process", "maintenance", "learning"];
+const GOAL_STATUSES: GoalStatus[] = ["draft", "active", "at_risk", "paused", "completed", "abandoned", "archived"];
+const PRIORITIES: Priority[] = ["must", "should", "could"];
+
+const GOAL_FIELDS: FieldSpecs = {
+  title: nonEmptyText, description: text, level: oneOf(GOAL_LEVELS), type: oneOf(GOAL_TYPES), status: oneOf(GOAL_STATUSES),
+  area_id: idOrNull, parent_id: idOrNull, priority: oneOf(PRIORITIES), start_date: dateOrNull, target_date: dateOrNull,
+  progress: int(0, 100, false), confidence: int(1, 5), success_criteria: text, motivation: text,
+};
 
 app.post("/api/goals", async (c) => {
   const userId = c.get("userId");
@@ -274,11 +283,9 @@ app.put("/api/goals/:id", async (c) => {
   const userId = c.get("userId");
   const id = Number(c.req.param("id"));
   const b = await c.req.json<Record<string, unknown>>();
-  for (const f of GOAL_FIELDS) {
-    if (f in b) {
-      await c.env.DB.prepare(`UPDATE goals SET ${f} = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?`)
-        .bind(b[f], id, userId).run();
-    }
+  for (const [f, v] of coerceFields(b, GOAL_FIELDS)) {
+    await c.env.DB.prepare(`UPDATE goals SET ${f} = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?`)
+      .bind(v, id, userId).run();
   }
   const row = await c.env.DB.prepare("SELECT * FROM goals WHERE id = ? AND user_id = ?").bind(id, userId).first();
   return c.json({ goal: row });
@@ -664,6 +671,14 @@ app.post("/api/guide/apply", async (c) => {
 // ---------- fallback ----------
 
 app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));
+
+// A bad field in a partial update (see worker/validate.ts) is the client's fault: 400, not 500.
+app.onError((err, c) => {
+  if (err instanceof BadInput) return c.json({ error: err.message }, 400);
+  if (err instanceof HTTPException) return err.getResponse();
+  console.error(err);
+  return c.text("Internal Server Error", 500);
+});
 
 // Cron ticks (Telegram scheduler). No trigger is configured in wrangler.jsonc until the telegram_* migration lands.
 export default {
