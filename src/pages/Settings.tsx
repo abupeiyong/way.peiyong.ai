@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.ts";
-import type { Area } from "../../shared/types.ts";
+import type { Area, SecuritySettings } from "../../shared/types.ts";
 import { useApp } from "../App.tsx";
 import { Icon } from "../components/Icon.tsx";
 
@@ -12,9 +12,27 @@ export default function Settings() {
   const [refineOpen, setRefineOpen] = useState(false);
   const [directionDraft, setDirectionDraft] = useState("");
   const [savedNote, setSavedNote] = useState(false);
+  // null = not loaded (or unavailable): the Security card stays hidden.
+  const [security, setSecurity] = useState<SecuritySettings | null>(null);
+  const [confirmDisable, setConfirmDisable] = useState(false);
+  const [securityError, setSecurityError] = useState("");
 
   const loadAreas = () => api.get<{ areas: Area[] }>("/api/goals").then((r) => setAreas(r.areas));
   useEffect(() => { loadAreas(); }, []);
+  useEffect(() => {
+    api.get<{ security: SecuritySettings }>("/api/security").then((r) => setSecurity(r.security)).catch(() => setSecurity(null));
+  }, []);
+
+  const setPasswordLogin = async (disabled: boolean) => {
+    setSecurityError("");
+    try {
+      await api.put("/api/security", { password_login_disabled: disabled });
+      setSecurity((prev) => prev && { ...prev, password_login_disabled: disabled });
+    } catch (err) {
+      setSecurityError(err instanceof Error ? err.message : "Could not save.");
+    }
+    setConfirmDisable(false);
+  };
 
   const saveProfile = async () => {
     await api.put("/api/me", { name });
@@ -115,6 +133,66 @@ export default function Settings() {
           <button className="btn small" onClick={addArea}><Icon name="plus" /> Add area</button>
         </div>
       </div>
+
+      {security && (
+        <div className="card">
+          <div className="card-label">
+            安全 <i>Security</i>
+            {security.password_login_disabled && <span className="chip red">仅 Telegram · Telegram only</span>}
+          </div>
+          {security.password_login_disabled ? (
+            <div className="stack">
+              <p className="muted small">
+                邮箱 + 密码登录已关闭，只能用 Telegram 登录。<br />
+                Email + password sign-in is off. Telegram is the only way in.
+              </p>
+              <div>
+                <button className="btn ghost" onClick={() => setPasswordLogin(false)}>Re-enable email + password sign-in</button>
+              </div>
+            </div>
+          ) : (
+            <div className="stack">
+              <p className="muted small">
+                只用 Telegram 登录。密码不会被删除，随时可在已登录的会话里重新开启。<br />
+                Make Telegram the only way in. Your password is kept; any signed-in session can turn it back on.
+              </p>
+              {!security.telegram_verified && (
+                <p className="muted small">
+                  需先用 Telegram 登录过一次。<br />
+                  Available after you have signed in with Telegram at least once.
+                </p>
+              )}
+              <div>
+                <button className="btn danger" disabled={!security.telegram_verified} onClick={() => setConfirmDisable(true)}>
+                  Disable email + password sign-in
+                </button>
+              </div>
+            </div>
+          )}
+          {securityError && <p className="small" style={{ color: "var(--red)", marginTop: 8 }}>{securityError}</p>}
+        </div>
+      )}
+
+      {confirmDisable && (
+        <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setConfirmDisable(false); }}>
+          <div className="modal" style={{ maxWidth: 480 }}>
+            <div className="modal-head">
+              <h3>关闭密码登录</h3>
+              <button className="icon-btn" onClick={() => setConfirmDisable(false)}><Icon name="x" /></button>
+            </div>
+            <div className="stack">
+              <p>如果你失去这个 Telegram 账号，你就失去了 Way。没有找回邮箱。</p>
+              <p>If you lose access to this Telegram account, you lose access to Way. There is no recovery email.</p>
+            </div>
+            <div className="modal-actions">
+              <div className="right">
+                <button className="btn ghost" onClick={() => setConfirmDisable(false)}>Cancel</button>
+                <button className="btn" onClick={() => setPasswordLogin(true)}>Disable password sign-in</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <div className="card-label">会话 <i>Session</i></div>
