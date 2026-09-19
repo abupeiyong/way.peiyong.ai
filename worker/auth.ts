@@ -64,3 +64,18 @@ export const SESSION_DAYS = 30;
 export function sessionCookie(token: string, maxAgeSeconds: number): string {
   return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAgeSeconds}`;
 }
+
+/** Binds a Telegram sign-in code to the browser that asked for it (PRD §5.2(c)). Only sent to /api/auth/telegram/*. */
+export const PENDING_COOKIE = "way_pending";
+
+export function pendingCookie(token: string, maxAgeSeconds: number): string {
+  return `${PENDING_COOKIE}=${token}; Path=/api/auth/telegram; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAgeSeconds}`;
+}
+
+/** Six uniformly random digits, e.g. "418233". Rejection sampling keeps the modulo unbiased. */
+export function newOtpCode(): string {
+  const buf = new Uint32Array(1);
+  do crypto.getRandomValues(buf);
+  while (buf[0] >= 4_294_000_000); // largest multiple of 10^6 below 2^32
+  return String(buf[0] % 1_000_000).padStart(6, "0");
+}
