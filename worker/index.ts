@@ -10,10 +10,18 @@ import { carryOver, deleteTask, materializeRepeats, updateTask } from "./tasks.t
 import { updateDay } from "./days.ts";
 import { upsertReview, type ReviewInput } from "./reviews.ts";
 import { issueOtp, redeemOtp, OTP_TTL_SECONDS } from "./telegram/otp.ts";
-import { runSchedules } from "./telegram/schedule.ts";
+import { sendMorning } from "./telegram/compose.ts";
+import { updateTelegramPrefs } from "./telegram/prefs.ts";
+import {
+  runSchedules, isDisconnected, localDate, sendMessage, TelegramApiError, DISCONNECTED_UNTIL,
+} from "./telegram/schedule.ts";
+import { d1StateStore } from "./telegram/state.ts";
 import { verifyWidgetLogin } from "./telegram/widget.ts";
 import { BadInput, coerceFields, dateOrNull, idOrNull, int, nonEmptyText, oneOf, text, type FieldSpecs } from "./validate.ts";
-import type { GoalLevel, GoalStatus, GoalType, GuideProposal, Priority, ReviewPeriod, SecuritySettings } from "../shared/types.ts";
+import type {
+  GoalLevel, GoalStatus, GoalType, GuideProposal, Priority, ReviewPeriod, SecuritySettings,
+  TelegramPrefs, TelegramSettings,
+} from "../shared/types.ts";
 
 export interface Env {
   DB: D1Database;
@@ -290,6 +298,99 @@ app.put("/api/security", async (c) => {
   ).bind(userId, userId).run();
   if (!res.meta.changes) {
     return c.json({ error: "Sign in with Telegram at least once before disabling password sign-in." }, 409);
+  }
+  return c.json({ ok: true });
+});
+
+// ---------- telegram settings ----------
+// The Settings → Telegram card (PRD §5.1 step 6, §9). Linking itself happens in the bot (#7).
+// Schema assumed from #2/#4: telegram_accounts(user_id, chat_id, username, paused_until, …) — SELECT * so the
+// card still loads if username is missing — plus telegram_prefs and users.timezone (see telegram/prefs.ts).
+
+app.get("/api/telegram", async (c) => {
+  const userId = c.get("userId");
+  const [account, prefs, user] = await Promise.all([
+    c.env.DB.prepare("SELECT * FROM telegram_accounts WHERE user_id = ?").bind(userId)
+      .first<{ username?: string | null; paused_until: string | null }>(),
+    c.env.DB.prepare("SELECT * FROM telegram_prefs WHERE user_id = ?").bind(userId).first<Partial<TelegramPrefs>>(),
+    c.env.DB.prepare("SELECT timezone FROM users WHERE id = ?").bind(userId).first<{ timezone: string | null }>(),
+  ]);
+  const telegram: TelegramSettings = {
+    linked: !!account,
+    username: account?.username ?? null,
+    disconnected: isDisconnected(account?.paused_until),
+    timezone: user?.timezone ?? null,
+    bot: c.env.TELEGRAM_BOT_TOKEN ? c.env.TELEGRAM_BOT_USERNAME?.replace(/^@/, "") || null : null,
+    prefs: {
+      morning_at: prefs?.morning_at ?? null,
+      review_at: prefs?.review_at ?? null,
+      quiet_from: prefs?.quiet_from ?? null,
+      quiet_to: prefs?.quiet_to ?? null,
+      nudges: prefs?.nudges ? 1 : 0,
+    },
+  };
+  return c.json({ telegram });
+});
+
+app.put("/api/telegram/prefs", async (c) => {
+  await updateTelegramPrefs(c.env.DB, c.get("userId"), await c.req.json<Record<string, unknown>>());
+  return c.json({ ok: true });
+});
+
+// Unlink. Prefs are kept so a re-link starts from the same times; everything the bot holds for this user goes.
+app.delete("/api/telegram", async (c) => {
+  const userId = c.get("userId");
+  const user = await c.env.DB.prepare("SELECT password_login_disabled FROM users WHERE id = ?")
+    .bind(userId).first<{ password_login_disabled: number }>();
+  // Telegram is this account's only way in (see /api/security): unlinking would lock the user out.
+  if (user?.password_login_disabled === 1) {
+    return c.json({ error: "Telegram is your only way to sign in. Re-enable email + password sign-in first." }, 409);
+  }
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM telegram_accounts WHERE user_id = ?").bind(userId),
+    c.env.DB.prepare("DELETE FROM telegram_codes WHERE user_id = ?").bind(userId),
+    c.env.DB.prepare("DELETE FROM telegram_state WHERE user_id = ?").bind(userId),
+    c.env.DB.prepare("DELETE FROM telegram_outbox_log WHERE user_id = ?").bind(userId),
+  ]);
+  return c.json({ ok: true });
+});
+
+// "Send me today's brief": the morning message, now, outside the schedule (no outbox claim).
+// A send that gets through clears a "bot was blocked" disconnect; a 403 sets it.
+app.post("/api/telegram/test", async (c) => {
+  const userId = c.get("userId");
+  const token = c.env.TELEGRAM_BOT_TOKEN;
+  if (!token) return c.json({ error: "Telegram is not configured." }, 503);
+  const db = c.env.DB;
+  const account = await db.prepare(
+    "SELECT a.chat_id, a.paused_until, u.timezone FROM telegram_accounts a JOIN users u ON u.id = a.user_id WHERE a.user_id = ?"
+  ).bind(userId).first<{ chat_id: number | string; paused_until: string | null; timezone: string | null }>();
+  if (!account) return c.json({ error: "Telegram is not connected." }, 404);
+  if (!(await underLimit(c.env.TG_FLOOD_LIMITER, `test:${userId}`))) {
+    return c.json({ error: "Too many test messages. Please wait a minute." }, 429);
+  }
+  let today: string;
+  try {
+    today = localDate(account.timezone || "UTC", new Date());
+  } catch {
+    today = localDate("UTC", new Date());
+  }
+  try {
+    await sendMorning({
+      db, userId, today,
+      state: d1StateStore(db, userId),
+      send: (reply) => sendMessage(token, account.chat_id, reply),
+    });
+  } catch (e) {
+    if (e instanceof TelegramApiError && e.status === 403) {
+      await db.prepare("UPDATE telegram_accounts SET paused_until = ? WHERE user_id = ?").bind(DISCONNECTED_UNTIL, userId).run();
+      return c.json({ error: "Telegram refused the message — the bot was blocked. Unblock it in Telegram and try again." }, 409);
+    }
+    if (e instanceof TelegramApiError) return c.json({ error: `Telegram: ${e.description}` }, 502);
+    throw e;
+  }
+  if (isDisconnected(account.paused_until)) {
+    await db.prepare("UPDATE telegram_accounts SET paused_until = NULL WHERE user_id = ?").bind(userId).run();
   }
   return c.json({ ok: true });
 });

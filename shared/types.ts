@@ -21,6 +21,30 @@ export interface SecuritySettings {
   password_login_disabled: boolean;
 }
 
+/** telegram_prefs: local 'HH:MM' slots in the user's timezone; null = off. */
+export interface TelegramPrefs {
+  morning_at: string | null;
+  review_at: string | null;
+  quiet_from: string | null;
+  quiet_to: string | null;
+  /** 0/1 */
+  nudges: number;
+}
+
+/** GET /api/telegram. */
+export interface TelegramSettings {
+  linked: boolean;
+  /** The linked Telegram @username, without the @. */
+  username: string | null;
+  /** The bot was blocked (paused_until far future): nothing is sent until a test message gets through. */
+  disconnected: boolean;
+  /** users.timezone (IANA); null = UTC. */
+  timezone: string | null;
+  /** The shared bot's @username, without the @; null when Telegram is not configured. */
+  bot: string | null;
+  prefs: TelegramPrefs;
+}
+
 export interface Area {
   id: number;
   name: string;
