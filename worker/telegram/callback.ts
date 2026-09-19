@@ -4,6 +4,10 @@
 // re-checks ownership against the user resolved from the chat, not from the data.
 
 import { carryOver, deleteTask, updateTask } from "../tasks.ts";
+import { REVIEW_QUESTIONS } from "../../shared/reviews.ts";
+import { rateDay, reviewFocus, reviewNext, reviewResume, reviewSkip } from "./review.ts";
+import type { Reply } from "./router.ts";
+import type { TelegramStateStore } from "./state.ts";
 
 export const CALLBACK_DATA_MAX_BYTES = 64;
 
@@ -20,7 +24,9 @@ type TaskAskGuide<Id extends Num> = `t:${Id}:a`;
 type TaskDelete<Id extends Num> = `t:${Id}:x`;
 type ActualMin<Id extends Num, Min extends Num> = `am:${Id}:${Min}`;
 type Rating<F extends RatingField, N extends Num> = `rt:${F}:${N}`;
-type ReviewStep = "rv:next" | "rv:skip";
+type ReviewStep = "rv:next" | "rv:resume";
+type ReviewSkip<Q extends Num> = `rv:skip:${Q}`;
+type ReviewFocus<Date extends string> = `rv:focus:${Date}`;
 type Carry = "c:f" | "c:d";
 type GoalProgress<Id extends Num, N extends Num> = `g:${Id}:p:${N}`;
 type ProposalAnswer<MsgId extends Num, Idx extends Num> = `pr:${MsgId}:${Idx}:${"y" | "n"}`;
@@ -33,7 +39,9 @@ export type Callback =
   | { verb: "task_delete"; taskId: number }
   | { verb: "actual_min"; taskId: number; min: number }
   | { verb: "rating"; field: RatingField; n: number }
-  | { verb: "review"; step: "next" | "skip" }
+  | { verb: "review"; step: "next" | "resume" }
+  | { verb: "review_skip"; question: number }
+  | { verb: "review_focus"; date: string }
   | { verb: "carry"; action: "forward" | "drop" }
   | { verb: "goal_progress"; goalId: number; progress: number }
   | { verb: "proposal"; msgId: number; idx: number; approve: boolean };
@@ -48,7 +56,7 @@ const MAX_PROPOSAL_IDX = 99;
 type MaxId = "9007199254740991"; // Number.MAX_SAFE_INTEGER — the largest id parseCallback accepts
 type Widest =
   | TaskDone<MaxId> | TaskSchedule<MaxId, "365"> | TaskLinkGoal<MaxId> | TaskAskGuide<MaxId> | TaskDelete<MaxId> | ActualMin<MaxId, "1440"> | Rating<RatingField, "5">
-  | ReviewStep | Carry | GoalProgress<MaxId, "100"> | ProposalAnswer<MaxId, "99">;
+  | ReviewStep | ReviewSkip<"9"> | ReviewFocus<"2026-12-31"> | Carry | GoalProgress<MaxId, "100"> | ProposalAnswer<MaxId, "99">;
 type Budget<N extends number, T extends 0[] = []> = T["length"] extends N ? T : Budget<N, [...T, 0]>;
 type Fits<S extends string, B extends 0[]> = S extends `${infer _}${infer Rest}`
   ? B extends [0, ...infer Left extends 0[]] ? Fits<Rest, Left> : false
@@ -64,6 +72,12 @@ function toId(s: string | undefined): number | null {
   if (!s || !/^[1-9]\d{0,15}$/.test(s)) return null;
   const n = Number(s);
   return Number.isSafeInteger(n) ? n : null;
+}
+
+function isDate(s: string | undefined): s is string {
+  if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(s + "T00:00:00Z");
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
 }
 
 function toInt(s: string | undefined, min: number, max: number): number | null {
@@ -96,8 +110,13 @@ export function parseCallback(data: string): Callback | null {
       const field = RATING_FIELDS.find((f) => f === p[1]), n = toInt(p[2], 1, 5);
       return p.length === 3 && field && n !== null ? { verb: "rating", field, n } : null;
     }
-    case "rv":
-      return p.length === 2 && (p[1] === "next" || p[1] === "skip") ? { verb: "review", step: p[1] } : null;
+    case "rv": {
+      if (p.length === 2 && (p[1] === "next" || p[1] === "resume")) return { verb: "review", step: p[1] };
+      const question = toInt(p[2], 1, REVIEW_QUESTIONS.daily.length);
+      if (p.length === 3 && p[1] === "skip" && question !== null) return { verb: "review_skip", question };
+      if (p.length === 3 && p[1] === "focus" && isDate(p[2])) return { verb: "review_focus", date: p[2] };
+      return null;
+    }
     case "c":
       return p.length === 2 && (p[1] === "f" || p[1] === "d") ? { verb: "carry", action: p[1] === "f" ? "forward" : "drop" } : null;
     case "g": {
@@ -130,7 +149,9 @@ export const cb = {
   taskDelete: (taskId: number): TaskDelete<number> => checked(`t:${taskId}:x` as const),
   actualMin: (taskId: number, min: number): ActualMin<number, number> => checked(`am:${taskId}:${min}` as const),
   rating: (field: RatingField, n: number): Rating<RatingField, number> => checked(`rt:${field}:${n}` as const),
-  review: (step: "next" | "skip"): ReviewStep => checked(`rv:${step}` as const),
+  review: (step: "next" | "resume"): ReviewStep => checked(`rv:${step}` as const),
+  reviewSkip: (question: number): ReviewSkip<number> => checked(`rv:skip:${question}` as const),
+  reviewFocus: (date: string): ReviewFocus<string> => checked(`rv:focus:${date}` as const),
   carry: (action: "forward" | "drop"): Carry => checked(action === "forward" ? "c:f" : "c:d"),
   goalProgress: (goalId: number, progress: number): GoalProgress<number, number> =>
     checked(`g:${goalId}:p:${progress}` as const),
@@ -150,6 +171,12 @@ export interface CallbackContext {
   answer(text?: string): Promise<void>;
   /** Edit the tapped message to its terminal state (buttons removed), so a second device cannot re-apply. */
   finish(text: string): Promise<void>;
+  /** Edit the tapped message in place and keep it live (new text and keyboard), e.g. the ratings card. */
+  edit(reply: Reply): Promise<void>;
+  /** Send a new message to the chat. */
+  send(reply: Reply): Promise<void>;
+  /** This user's telegram_state slot. */
+  state: TelegramStateStore;
 }
 
 /** Route one button tap. Always answers the callback query, even on bad data or errors. */
@@ -162,6 +189,10 @@ export async function handleCallback(ctx: CallbackContext, data: string): Promis
     else if (parsed.verb === "task_schedule") toast = await taskSchedule(ctx, parsed.taskId, parsed.offsetDays);
     else if (parsed.verb === "task_delete") toast = await taskDelete(ctx, parsed.taskId);
     else if (parsed.verb === "carry") toast = await carry(ctx, parsed.action);
+    else if (parsed.verb === "rating") toast = await rateDay(ctx, parsed.field, parsed.n);
+    else if (parsed.verb === "review") toast = parsed.step === "next" ? await reviewNext(ctx) : await reviewResume(ctx);
+    else if (parsed.verb === "review_skip") toast = await reviewSkip(ctx, parsed.question);
+    else if (parsed.verb === "review_focus") toast = await reviewFocus(ctx, parsed.date);
     else toast = "尚未支持 · Not available yet"; // the remaining verbs land with their features
   } finally {
     await ctx.answer(toast);
@@ -184,7 +215,7 @@ async function taskDone(ctx: CallbackContext, taskId: number): Promise<string> {
   return "已经完成了 · Already done";
 }
 
-function shiftDate(date: string, days: number): string {
+export function shiftDate(date: string, days: number): string {
   const d = new Date(date + "T00:00:00Z");
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);

@@ -1,44 +1,9 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.ts";
 import type { Review, ReviewPeriod } from "../../shared/types.ts";
+import { REVIEW_QUESTIONS } from "../../shared/reviews.ts";
 
 const PERIODS: ReviewPeriod[] = ["daily", "weekly", "monthly", "quarterly", "yearly"];
-
-const QUESTIONS: Record<ReviewPeriod, string[]> = {
-  daily: [
-    "What moved forward today?",
-    "What resisted or distracted me?",
-    "What did I learn?",
-    "What is tomorrow's single focus?",
-  ],
-  weekly: [
-    "Which goals moved forward this week?",
-    "Which commitments were missed?",
-    "Where did my time actually go?",
-    "Which life areas received attention — and which didn't?",
-    "What did I learn?",
-    "What remains unfinished, and what happens to it?",
-    "What is the focus for next week?",
-  ],
-  monthly: [
-    "How did this month's goals progress?",
-    "What worked well and deserves repeating?",
-    "What didn't work, and why?",
-    "What will I adjust for next month?",
-  ],
-  quarterly: [
-    "What did this quarter actually produce?",
-    "Is the direction still right?",
-    "What was the biggest lesson?",
-    "What is the focus for next quarter?",
-  ],
-  yearly: [
-    "How did the year serve my direction?",
-    "What am I proudest of?",
-    "What was hardest, and what did it teach me?",
-    "What is the theme for next year?",
-  ],
-};
 
 interface Payload {
   period: ReviewPeriod;
@@ -122,7 +87,7 @@ export default function Reviews() {
             </div>
           </div>
 
-          {QUESTIONS[period].map((q) => (
+          {REVIEW_QUESTIONS[period].map((q) => (
             <div className="review-q" key={q}>
               <label>{q}</label>
               <textarea className="input" rows={2} value={answers[q] ?? ""}
