@@ -5,6 +5,7 @@ import { guideChat } from "./guide.ts";
 import { carryOver, deleteTask, materializeRepeats, updateTask } from "./tasks.ts";
 import { updateDay } from "./days.ts";
 import { upsertReview, type ReviewInput } from "./reviews.ts";
+import { runSchedules } from "./telegram/schedule.ts";
 import type { GoalLevel, GuideProposal, ReviewPeriod } from "../shared/types.ts";
 
 export interface Env {
@@ -14,6 +15,7 @@ export interface Env {
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL?: string;
   OPENAI_CHAT_MODEL?: string;
+  TELEGRAM_BOT_TOKEN?: string;
 }
 
 type Vars = { userId: number };
@@ -663,4 +665,10 @@ app.post("/api/guide/apply", async (c) => {
 
 app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));
 
-export default app;
+// Cron ticks (Telegram scheduler). No trigger is configured in wrangler.jsonc until the telegram_* migration lands.
+export default {
+  fetch: app.fetch,
+  scheduled(controller, env, ctx) {
+    ctx.waitUntil(runSchedules(env, controller.scheduledTime));
+  },
+} satisfies ExportedHandler<Env>;
