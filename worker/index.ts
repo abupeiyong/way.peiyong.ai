@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import { hashPassword, verifyPassword, newSessionToken, sessionCookie, SESSION_COOKIE, SESSION_DAYS } from "./auth.ts";
 import { guideChat } from "./guide.ts";
-import { carryOver, deleteTask, updateTask } from "./tasks.ts";
+import { carryOver, deleteTask, materializeRepeats, updateTask } from "./tasks.ts";
 import { updateDay } from "./days.ts";
 import { upsertReview, type ReviewInput } from "./reviews.ts";
 import type { GoalLevel, GuideProposal, ReviewPeriod } from "../shared/types.ts";
@@ -162,38 +162,6 @@ app.put("/api/me", async (c) => {
 });
 
 // ---------- day / tasks ----------
-
-/** Materialize repeating tasks into concrete instances for one date. */
-async function materializeRepeats(db: D1Database, userId: number, date: string) {
-  const dow = new Date(date + "T00:00:00Z").getUTCDay();
-  const { results } = await db
-    .prepare(
-      `SELECT * FROM tasks
-       WHERE user_id = ? AND repeat != 'never' AND repeat_src IS NULL AND dropped = 0
-         AND date IS NOT NULL AND date <= ?`
-    )
-    .bind(userId, date)
-    .all<Record<string, unknown>>();
-  for (const t of results) {
-    if (t.date === date) continue;
-    const tDow = new Date((t.date as string) + "T00:00:00Z").getUTCDay();
-    if (t.repeat === "weekly" && tDow !== dow) continue;
-    const dup = await db
-      .prepare("SELECT id FROM tasks WHERE user_id = ? AND repeat_src = ? AND date = ?")
-      .bind(userId, t.id, date)
-      .first();
-    if (dup) continue;
-    await db
-      .prepare(
-        `INSERT INTO tasks (user_id, title, description, date, priority, energy, estimate_min, start_min, end_min,
-                            goal_id, project_id, repeat, repeat_src, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'never', ?, ?)`
-      )
-      .bind(userId, t.title, t.description, date, t.priority, t.energy, t.estimate_min, t.start_min, t.end_min,
-            t.goal_id, t.project_id, t.id, t.notes)
-      .run();
-  }
-}
 
 app.get("/api/day", async (c) => {
   const userId = c.get("userId");

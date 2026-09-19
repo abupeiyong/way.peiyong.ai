@@ -47,3 +47,35 @@ export async function captureToInbox(db: D1Database, userId: number, title: stri
   if (!row) throw new Error("capture failed");
   return row;
 }
+
+/** Materialize repeating tasks into concrete instances for one date (GET /api/day and the morning message). */
+export async function materializeRepeats(db: D1Database, userId: number, date: string) {
+  const dow = new Date(date + "T00:00:00Z").getUTCDay();
+  const { results } = await db
+    .prepare(
+      `SELECT * FROM tasks
+       WHERE user_id = ? AND repeat != 'never' AND repeat_src IS NULL AND dropped = 0
+         AND date IS NOT NULL AND date <= ?`
+    )
+    .bind(userId, date)
+    .all<Record<string, unknown>>();
+  for (const t of results) {
+    if (t.date === date) continue;
+    const tDow = new Date((t.date as string) + "T00:00:00Z").getUTCDay();
+    if (t.repeat === "weekly" && tDow !== dow) continue;
+    const dup = await db
+      .prepare("SELECT id FROM tasks WHERE user_id = ? AND repeat_src = ? AND date = ?")
+      .bind(userId, t.id, date)
+      .first();
+    if (dup) continue;
+    await db
+      .prepare(
+        `INSERT INTO tasks (user_id, title, description, date, priority, energy, estimate_min, start_min, end_min,
+                            goal_id, project_id, repeat, repeat_src, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'never', ?, ?)`
+      )
+      .bind(userId, t.title, t.description, date, t.priority, t.energy, t.estimate_min, t.start_min, t.end_min,
+            t.goal_id, t.project_id, t.id, t.notes)
+      .run();
+  }
+}
