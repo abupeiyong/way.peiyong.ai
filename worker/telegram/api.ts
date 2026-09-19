@@ -212,6 +212,34 @@ export interface SetWebhookParams {
   max_connections?: number;
 }
 
+/** The update types the webhook handles; passed to setWebhook so Telegram sends nothing else. */
+export const ALLOWED_UPDATES = ["message", "callback_query", "inline_query", "chosen_inline_result"];
+
+/** One inline-mode result: picking it sends `input_message_content` into the chat and (with inline feedback on) a chosen_inline_result. */
+export interface InlineQueryResultArticle {
+  type: "article";
+  id: string;
+  title: string;
+  description?: string;
+  input_message_content: { message_text: string; parse_mode?: "HTML" };
+}
+
+export interface AnswerInlineQueryParams {
+  inline_query_id: string;
+  results: InlineQueryResultArticle[];
+  cache_time?: number;
+  is_personal?: boolean;
+  /** A button above the results that opens the bot's private chat with `start_parameter`. */
+  button?: { text: string; start_parameter: string };
+}
+
+export interface TgFile {
+  file_id: string;
+  file_size?: number;
+  /** Relative path for https://api.telegram.org/file/bot<token>/<file_path>; valid for about an hour. */
+  file_path?: string;
+}
+
 export interface TextOptions {
   /** Applied when the text is over TEXT_MAX. Without one, the call returns "too_long" and nothing is sent. */
   truncate?: Truncate;
@@ -281,6 +309,21 @@ export class TelegramBot {
   setWebhook(p: SetWebhookParams): Promise<TgResult<true>> {
     return this.call("setWebhook", p);
   }
+
+  answerInlineQuery(p: AnswerInlineQueryParams): Promise<TgResult<true>> {
+    return this.call("answerInlineQuery", p);
+  }
+
+  getFile(fileId: string): Promise<TgResult<TgFile>> {
+    return this.call("getFile", { file_id: fileId });
+  }
+
+  /** The bytes of a file getFile described. Throws TelegramApiError when the download fails. */
+  async downloadFile(filePath: string): Promise<ArrayBuffer> {
+    const res = await fetch(`${API_BASE}/file/bot${this.#token}/${filePath}`);
+    if (!res.ok) throw new TelegramApiError({ ok: false, kind: "error", status: res.status, description: `file download: ${res.statusText}` });
+    return res.arrayBuffer();
+  }
 }
 
 /** `html` if it fits, else the truncated text if that fits, else null. */
@@ -298,10 +341,16 @@ function tooLong(html: string): TgFailure {
 
 /** Send a plain-text Reply (escaped, clipped at TEXT_MAX). Throws TelegramApiError on failure. */
 export async function sendReply(bot: TelegramBot, chatId: ChatId, reply: Reply): Promise<void> {
-  orThrow(await bot.sendMessage(
+  await sendReplyId(bot, chatId, reply);
+}
+
+/** sendReply, returning the new message's id (a Guide reply remembers it so a reply-to continues the thread). */
+export async function sendReplyId(bot: TelegramBot, chatId: ChatId, reply: Reply): Promise<number> {
+  const sent = orThrow(await bot.sendMessage(
     { chat_id: chatId, text: esc(reply.text), ...(reply.reply_markup && { reply_markup: reply.reply_markup }) },
     { truncate: clipHtml },
   ));
+  return sent.message_id;
 }
 
 /** Edit a message to a plain-text Reply; no reply_markup removes its buttons. Identical content is not an error. */
@@ -324,7 +373,18 @@ export async function editReply(bot: TelegramBot, chatId: ChatId, messageId: num
  */
 export const BOT_COMMANDS: BotCommand[] = [
   { command: "today", description: "今天 · Today's plan" },
-  { command: "plan", description: "计划 · Plan the day" },
+  { command: "plan", description: "三件事 · Plan the day" },
   { command: "task", description: "记一件事 · Add a task" },
+  { command: "done", description: "完成 · Tick off a task" },
+  { command: "inbox", description: "收件箱 · Inbox" },
+  { command: "week", description: "本周 · This week's plan" },
   { command: "goals", description: "目标 · Goals" },
+  { command: "review", description: "复盘 · Review the day" },
+  { command: "note", description: "记一笔 · Add to today's reflection" },
+  { command: "guide", description: "道引 · Ask the Guide" },
+  { command: "find", description: "查找 · Find tasks and goals" },
+  { command: "timezone", description: "时区 · Time zone" },
+  { command: "settings", description: "设置 · Notifications" },
+  { command: "mute", description: "静音 · Pause notifications" },
+  { command: "help", description: "帮助 · All commands" },
 ];

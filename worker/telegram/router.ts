@@ -20,13 +20,34 @@ export interface TgUser {
   first_name?: string;
 }
 
+export interface TgEntity {
+  type: string;
+  offset: number;
+  length: number;
+  /** text_link only. */
+  url?: string;
+}
+
+/** Where a forwarded message came from (Bot API 7+). */
+export type TgForwardOrigin =
+  | { type: "user"; sender_user: TgUser }
+  | { type: "hidden_user"; sender_user_name: string }
+  | { type: "chat"; sender_chat: { title?: string; username?: string }; author_signature?: string }
+  | { type: "channel"; chat: { title?: string; username?: string }; message_id: number };
+
 export interface TgMessage {
   message_id: number;
+  /** Unix seconds. */
+  date?: number;
   chat: { id: number };
   from?: TgUser;
   text?: string;
   caption?: string;
+  entities?: TgEntity[];
+  caption_entities?: TgEntity[];
   reply_to_message?: TgMessage;
+  voice?: { file_id: string; duration: number; mime_type?: string; file_size?: number };
+  forward_origin?: TgForwardOrigin;
 }
 
 export interface TgCallbackQuery {
@@ -36,10 +57,24 @@ export interface TgCallbackQuery {
   message?: TgMessage;
 }
 
+export interface TgInlineQuery {
+  id: string;
+  from: TgUser;
+  query: string;
+}
+
+export interface TgChosenInlineResult {
+  result_id: string;
+  from: TgUser;
+  query: string;
+}
+
 export interface TgUpdate {
   update_id: number;
   message?: TgMessage;
   callback_query?: TgCallbackQuery;
+  inline_query?: TgInlineQuery;
+  chosen_inline_result?: TgChosenInlineResult;
 }
 
 export type { ForceReply, InlineKeyboardButton, InlineKeyboardMarkup } from "./api.ts";
@@ -61,13 +96,19 @@ export interface RouteHandlers {
   pendingState(message: TgMessage, text: string): Promise<boolean>;
   /** 4. Continue the Guide thread if `message.reply_to_message` is a Guide message. Returns false otherwise. */
   guideReply(message: TgMessage, text: string): Promise<boolean>;
-  /** 5. The default. */
+  /** 5. The default. A forwarded message arrives here too (message.forward_origin says where from). */
   capture(message: TgMessage, text: string): Promise<void>;
+  /** A voice message: transcribe, then capture. */
+  voice(message: TgMessage): Promise<void>;
+  /** `@bot query` typed in any chat: answer with what picking it would do. */
+  inlineQuery(query: TgInlineQuery): Promise<void>;
+  /** The user picked an inline result (needs inline feedback on in BotFather). */
+  chosenInline(chosen: TgChosenInlineResult): Promise<void>;
   /** A message with no text (sticker, photo without caption, …). */
   unsupported(message: TgMessage): Promise<void>;
 }
 
-export type RouteKind = "callback" | "command" | "state" | "guide" | "capture" | "unsupported" | "ignored";
+export type RouteKind = "callback" | "inline" | "chosen" | "command" | "state" | "guide" | "capture" | "voice" | "unsupported" | "ignored";
 
 const COMMAND = /^\/([A-Za-z0-9_]{1,32})(?:@[A-Za-z0-9_]+)?(?:\s+([\s\S]*))?$/;
 
@@ -82,10 +123,22 @@ export async function routeUpdate(update: TgUpdate, h: RouteHandlers): Promise<R
     await h.callback(update.callback_query);
     return "callback";
   }
+  if (update.inline_query) {
+    await h.inlineQuery(update.inline_query);
+    return "inline";
+  }
+  if (update.chosen_inline_result) {
+    await h.chosenInline(update.chosen_inline_result);
+    return "chosen";
+  }
   const message = update.message;
   if (!message) return "ignored";
   const text = (message.text ?? message.caption ?? "").trim();
   if (!text) {
+    if (message.voice) {
+      await h.voice(message);
+      return "voice";
+    }
     await h.unsupported(message);
     return "unsupported";
   }
@@ -134,7 +187,36 @@ export function captureReply(task: { id: number; title: string }): Reply {
   };
 }
 
-/** Step 5 end to end: an inbox task (inbox = 1, date = NULL) and the card to send back. */
-export async function captureMessage(db: D1Database, userId: number, text: string): Promise<Reply> {
-  return captureReply(await captureToInbox(db, userId, text));
+/** "Forwarded from X" for the notes of a captured forward, or null when the message was not forwarded. */
+export function forwardSource(message: TgMessage): string | null {
+  const o = message.forward_origin;
+  if (!o) return null;
+  if (o.type === "user") return `Forwarded from ${o.sender_user.first_name ?? ""}${o.sender_user.username ? ` (@${o.sender_user.username})` : ""}`.trim();
+  if (o.type === "hidden_user") return `Forwarded from ${o.sender_user_name}`;
+  if (o.type === "chat") return `Forwarded from ${o.sender_chat.title ?? o.sender_chat.username ?? "a chat"}`;
+  const link = o.chat.username ? ` — https://t.me/${o.chat.username}/${o.message_id}` : "";
+  return `Forwarded from ${o.chat.title ?? o.chat.username ?? "a channel"}${link}`;
+}
+
+/** The URLs a message carries (url and text_link entities), in order. */
+export function messageLinks(message: TgMessage, text: string): string[] {
+  const entities = message.entities ?? message.caption_entities ?? [];
+  const chars = [...text];
+  const out: string[] = [];
+  for (const e of entities) {
+    if (e.type === "text_link" && e.url) out.push(e.url);
+    else if (e.type === "url") out.push(chars.slice(e.offset, e.offset + e.length).join(""));
+  }
+  return out;
+}
+
+/** Step 5 end to end: an inbox task (inbox = 1, date = NULL) and the card to send back. A forward keeps its source and links in the notes. */
+export async function captureMessage(db: D1Database, userId: number, text: string, message?: TgMessage): Promise<Reply> {
+  const source = message ? forwardSource(message) : null;
+  const links = message ? messageLinks(message, message.text ?? message.caption ?? "") : [];
+  const firstLine = text.split(/\r?\n/)[0].trim();
+  // A forward's title is its first line; the whole text lives in the notes with where it came from.
+  const title = source && firstLine ? firstLine.slice(0, 200) : text;
+  const notes = [source, source && text !== firstLine ? text : null, ...links.filter((l) => !text.includes(l))].filter(Boolean).join("\n");
+  return captureReply(await captureToInbox(db, userId, title, notes));
 }

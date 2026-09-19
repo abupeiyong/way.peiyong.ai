@@ -2,32 +2,37 @@
 //   secret      → X-Telegram-Bot-Api-Secret-Token compared in constant time; a mismatch is an empty 200 + a log line
 //   dedupe      → INSERT OR IGNORE telegram_updates(update_id); 0 changes = already handled → 200, nothing runs
 //   respond     → 200 at once; handleUpdate runs inside waitUntil
-//   link        → `/start link_<nonce>` goes to redeemLink before any user is required (see link.ts)
+//   inline      → inline_query / chosen_inline_result need no chat: answered before anything else (capture.ts)
+//   link        → `/start link_<nonce>` goes to redeemLink before any user is required (link.ts)
 //   resolve     → from.id → telegram_accounts.user_id, once; every handler gets that userId (never chat_id)
-//   unknown     → a sender with no linked account is told to link it on the web
-//   dispatch    → flood guard, then routeUpdate with the handlers below
+//   unknown     → /start offers to link or to create an account (register.ts); anything else says "link first"
+//   dispatch    → flood guard, then routeUpdate with the handlers below (commands.ts, callback.ts, the state machines)
 //   errors      → logged, and the user gets 出错了，请稍后再试; the response was already a 200
 //
-// Schema assumed from #4: telegram_updates(update_id PRIMARY KEY, created_at DEFAULT now) — housekeeping in
-// schedule.ts deletes rows older than a day; telegram_accounts(user_id, telegram_user_id UNIQUE); users.timezone.
-//
-// Registration (once per bot): wrangler secret put TELEGRAM_WEBHOOK_SECRET, then
-//   https://api.telegram.org/bot<token>/setWebhook?url=https://way.peiyong.ai/api/telegram/webhook
-//     &secret_token=<the same secret>&allowed_updates=["message","callback_query"]
+// Registration (once per bot): wrangler secret put TELEGRAM_WEBHOOK_SECRET, then POST /api/telegram/setup
+// (`npm run telegram:setup`), which calls setWebhook with the same secret and ALLOWED_UPDATES.
 // Every Bot API call goes through api.ts.
 
 import { timingSafeEqual } from "../auth.ts";
 import type { GuideEnv } from "../guide.ts";
-import { editReply, orThrow, sendReply, TelegramBot } from "./api.ts";
-import { handleCallback, type CallbackContext } from "./callback.ts";
+import { timezoneAnswer } from "./account.ts";
+import { editReply, orThrow, sendReply, sendReplyId, TelegramBot } from "./api.ts";
+import { handleCallback, parseCallback, type CallbackContext } from "./callback.ts";
+import { answerInline, captureVoice, chosenInline } from "./capture.ts";
+import { handleCommand } from "./commands.ts";
+import { logEvent } from "./events.ts";
+import { goalProgressAnswer } from "./goals.ts";
+import { guideReplyThread } from "./guide.ts";
 import { redeemLink } from "./link.ts";
-import { interruptReview, reviewAnswer } from "./review.ts";
+import { onboardAnswer, registerCreate, registerOffer, startOnboarding } from "./register.ts";
+import { reviewAnswer } from "./review.ts";
 import {
   captureMessage, floodGuard, parseCommand, routeUpdate, SLOW_DOWN, type Reply, type TgUpdate,
 } from "./router.ts";
 import { localDate } from "./schedule.ts";
 import { d1StateStore } from "./state.ts";
 import { topThreeAnswer } from "./topthree.ts";
+import { weeklyPlanAnswer } from "./weekly.ts";
 
 export interface WebhookEnv extends GuideEnv {
   DB: D1Database;
@@ -59,22 +64,14 @@ const ERROR: Reply = { text: "出错了，请稍后再试 · Something went wron
 function linkFirst(origin: string): Reply {
   return {
     text: "这个 Telegram 还没连接 Way 账号 · This Telegram isn't linked to a Way account yet.\n" +
-      `在 ${origin}/settings 连接 · Link your account at ${origin}/settings`,
+      `在 ${origin}/settings 连接，或发 /start 在这里创建账号 · Link at ${origin}/settings, or /start to create an account here`,
   };
 }
 
 /** answerCallbackQuery toasts are capped at 200 characters. */
-const LINK_FIRST_TOAST = "请先在 way.peiyong.ai 连接账号 · Link your account at way.peiyong.ai first";
+const LINK_FIRST_TOAST = "请先连接 Way 账号：/start · Link your Way account first: /start";
 
-const CONNECTED: Reply = {
-  text: "已连接 · You're connected.\n随手发一句话，就收进 Inbox · Send me anything and it goes to your inbox.",
-};
-
-const TEXT_ONLY: Reply = { text: "目前只收文字 · Text only for now — send it as a message." };
-
-function notYet(name: string): Reply {
-  return { text: `暂不支持 /${name} · /${name} isn't available yet.` };
-}
+const TEXT_ONLY: Reply = { text: "目前只收文字和语音 · Text and voice only for now — send it as a message." };
 
 // ---------- the update ----------
 
@@ -95,6 +92,15 @@ export async function handleUpdate(env: WebhookEnv, update: TgUpdate, origin: st
     console.error("telegram webhook:", e);
     return;
   }
+  // Inline mode carries no chat; it is answered on its own.
+  if (update.inline_query) {
+    await answerInline(bot, env.DB, update.inline_query).catch((e) => console.error("telegram inline: failed", e));
+    return;
+  }
+  if (update.chosen_inline_result) {
+    await chosenInline(env.DB, update.chosen_inline_result).catch((e) => console.error("telegram inline: capture failed", e));
+    return;
+  }
   const query = update.callback_query;
   const from = update.message?.from ?? query?.from;
   // A tap on a message too old to be delivered with the query still has a private chat: the user's own id.
@@ -102,7 +108,7 @@ export async function handleUpdate(env: WebhookEnv, update: TgUpdate, origin: st
   if (!from || chatId === undefined) return;
   const send = (reply: Reply) => sendReply(bot, chatId, reply);
   try {
-    await dispatch(env, bot, update, from.id, send, origin);
+    await dispatch(env, bot, update, from.id, chatId, send, origin);
   } catch (e) {
     console.error(`telegram webhook: update ${update.update_id} failed`, e);
     if (query) await bot.answerCallbackQuery({ callback_query_id: query.id });
@@ -111,7 +117,7 @@ export async function handleUpdate(env: WebhookEnv, update: TgUpdate, origin: st
 }
 
 async function dispatch(
-  env: WebhookEnv, bot: TelegramBot, update: TgUpdate, telegramUserId: number,
+  env: WebhookEnv, bot: TelegramBot, update: TgUpdate, telegramUserId: number, chatId: number,
   send: (reply: Reply) => Promise<void>, origin: string,
 ): Promise<void> {
   const db = env.DB;
@@ -130,12 +136,28 @@ async function dispatch(
     if (reply) return send(reply);
   }
 
-  const account = await db.prepare(
+  let account = await db.prepare(
     "SELECT a.user_id, u.timezone FROM telegram_accounts a JOIN users u ON u.id = a.user_id WHERE a.telegram_user_id = ?"
   ).bind(telegramUserId).first<{ user_id: number; timezone: string | null }>();
+
   if (!account) {
+    // rg:y — create the account right here (register.ts), then continue as that user.
+    const tapped = query?.data ? parseCallback(query.data) : null;
+    if (query && tapped?.verb === "register") {
+      if (!tapped.yes) return answer("好的 · OK");
+      const from = query.from;
+      const userId = await registerCreate(db, from, chatId);
+      if (userId === null) return answer("这个 Telegram 已经连接了账号 · Already linked");
+      await answer("账号已创建 · Account created");
+      if (query.message) await editReply(bot, chatId, query.message.message_id, { text: "✨ 账号已创建 · Account created" });
+      account = { user_id: userId, timezone: null };
+      await startOnboarding({
+        db, userId, timezone: null, state: d1StateStore(db, userId), send,
+      });
+      return;
+    }
     if (query) return answer(LINK_FIRST_TOAST);
-    if (update.message) return send(linkFirst(origin));
+    if (update.message) return send(start?.name === "start" ? registerOffer(origin) : linkFirst(origin));
     return;
   }
   const userId = account.user_id;
@@ -149,27 +171,34 @@ async function dispatch(
     db,
     userId,
     today: todayIn(account.timezone),
+    timezone: account.timezone,
+    origin,
     state: d1StateStore(db, userId),
     guide: env,
+    bot,
     answer,
     finish: (text) => (tapped ? editReply(bot, tapped.chat.id, tapped.message_id, { text }) : send({ text })),
     edit: (reply) => (tapped ? editReply(bot, tapped.chat.id, tapped.message_id, reply) : send(reply)),
     send,
+    sendId: (reply) => sendReplyId(bot, chatId, reply),
+    typing: async () => { await bot.sendChatAction({ chat_id: chatId, action: "typing" }); },
   };
 
   await routeUpdate(update, {
     callback: (q) => handleCallback(ctx, q.data ?? ""),
-    async command(name) {
-      // The command table (/today, /plan, /task, …) lands with #20.
-      await send(name === "start" ? CONNECTED : notYet(name));
-      const paused = await interruptReview(ctx);
-      if (paused) await send(paused);
-    },
+    command: (name, args, message) => handleCommand(ctx, name, args, message),
     // Each state machine only takes its own kind, so the order only matters for who looks first.
-    pendingState: async (_message, text) => (await reviewAnswer(ctx, text)) || (await topThreeAnswer(ctx, text)),
-    // Guide threads in Telegram land with their own issue; until then a reply falls through to capture.
-    guideReply: async () => false,
-    capture: async (_message, text) => send(await captureMessage(db, userId, text)),
+    pendingState: async (_message, text) =>
+      (await reviewAnswer(ctx, text)) || (await topThreeAnswer(ctx, text)) || (await weeklyPlanAnswer(ctx, text))
+      || (await goalProgressAnswer(ctx, text)) || (await timezoneAnswer(ctx, text)) || (await onboardAnswer(ctx, text)),
+    guideReply: (message, text) => guideReplyThread(ctx, message, text),
+    capture: async (message, text) => {
+      await send(await captureMessage(db, userId, text, message));
+      await logEvent(db, userId, "capture", "used");
+    },
+    voice: (message) => captureVoice(ctx, message),
+    inlineQuery: async () => {},   // handled before dispatch
+    chosenInline: async () => {},
     unsupported: () => send(TEXT_ONLY),
   });
 }

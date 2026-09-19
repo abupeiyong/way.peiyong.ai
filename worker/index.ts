@@ -17,7 +17,9 @@ import { sendMorning } from "./telegram/compose.ts";
 import { timezoneOrNull, updateTelegramPrefs } from "./telegram/prefs.ts";
 import { isLinkNonce, linkStatus, linkUrl, startLink, LINK_TTL_SECONDS } from "./telegram/link.ts";
 import { runSchedules, isDisconnected, localDate, DISCONNECTED_UNTIL } from "./telegram/schedule.ts";
-import { BOT_COMMANDS, sendReply, TelegramApiError, TelegramBot } from "./telegram/api.ts";
+import { ALLOWED_UPDATES, BOT_COMMANDS, sendReply, TelegramApiError, TelegramBot } from "./telegram/api.ts";
+import { describeBrowser, loginUrl, pollLogin, startLoginRequest, LOGIN_TTL_SECONDS } from "./telegram/login.ts";
+import { telegramStats } from "./telegram/events.ts";
 import { d1StateStore } from "./telegram/state.ts";
 import { userToday } from "./telegram/time.ts";
 import { verifyWidgetLogin } from "./telegram/widget.ts";
@@ -184,6 +186,37 @@ app.post("/api/auth/telegram/widget", async (c) => {
   ]);
   c.header("Set-Cookie", sessionCookie(token, SESSION_DAYS * 86400));
   return c.json({ ok: true });
+});
+
+// Deep-link sign-in (PRD §5.2(b)): the page mints a nonce bound to a fresh way_pending cookie, shows the
+// t.me link / QR, and polls; the bot asks the linked user to approve (telegram/login.ts).
+app.post("/api/auth/telegram/start", async (c) => {
+  const bot = c.env.TELEGRAM_BOT_TOKEN ? c.env.TELEGRAM_BOT_USERNAME?.replace(/^@/, "") || null : null;
+  if (!bot) return c.json({ error: "Telegram sign-in is not configured." }, 503);
+  const browserToken = newSessionToken();
+  const code = await startLoginRequest(c.env.DB, browserToken, {
+    country: (c.req.raw.cf as { country?: string } | undefined)?.country ?? c.req.header("CF-IPCountry") ?? "unknown",
+    browser: describeBrowser(c.req.header("User-Agent")),
+  });
+  c.header("Set-Cookie", pendingCookie(browserToken, LOGIN_TTL_SECONDS));
+  return c.json({ code, url: loginUrl(bot, code), expires_in: LOGIN_TTL_SECONDS });
+});
+
+app.get("/api/auth/telegram/poll", async (c) => {
+  const code = c.req.query("code");
+  const browserToken = getCookie(c, PENDING_COOKIE);
+  if (!browserToken || !code || !/^[0-9a-f]{32}$/.test(code)) return c.json({ state: "expired" });
+  const r = await pollLogin(c.env.DB, browserToken, code);
+  if (r.state !== "approved") return c.json({ state: r.state });
+  const token = newSessionToken();
+  const expires = new Date(Date.now() + SESSION_DAYS * 86400_000).toISOString();
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)").bind(token, r.userId, expires),
+    c.env.DB.prepare("UPDATE telegram_accounts SET verified_login = 1 WHERE user_id = ?").bind(r.userId),
+  ]);
+  c.header("Set-Cookie", sessionCookie(token, SESSION_DAYS * 86400));
+  c.header("Set-Cookie", pendingCookie("", 0), { append: true });
+  return c.json({ state: "approved" });
 });
 
 // Reachable without a session cookie. The webhook authenticates with its secret token instead (PRD §4.4).
@@ -407,14 +440,24 @@ app.post("/api/telegram/webhook", async (c) => {
   return c.body(null, 200);
 });
 
-// Deploy-time bot setup: installs the / command menu (BOT_COMMANDS in telegram/api.ts). Idempotent.
+app.get("/api/telegram/stats", async (c) => {
+  const userId = c.get("userId");
+  return c.json({ stats: await telegramStats(c.env.DB, userId, await todayFor(c.env.DB, userId)) });
+});
+
+// Deploy-time bot setup: registers the webhook (this origin, the same secret, ALLOWED_UPDATES) and installs
+// the / command menu (BOT_COMMANDS in telegram/api.ts). Idempotent.
 // `npm run telegram:setup` after a deploy, with TELEGRAM_WEBHOOK_SECRET in the shell (Authorization: Bearer <it>).
 app.post("/api/telegram/setup", async (c) => {
   const auth = c.req.header("Authorization")?.replace(/^Bearer\s+/i, "");
   if (!secretTokenOk(c.env.TELEGRAM_WEBHOOK_SECRET, auth)) return c.json({ error: "unauthorized" }, 401);
-  const r = await TelegramBot.fromEnv(c.env).setMyCommands({ commands: BOT_COMMANDS });
-  if (!r.ok) return c.json({ error: `Telegram: ${r.description}` }, 502);
-  return c.json({ ok: true, commands: BOT_COMMANDS.map((b) => b.command) });
+  const bot = TelegramBot.fromEnv(c.env);
+  const url = `${new URL(c.req.url).origin}/api/telegram/webhook`;
+  const hook = await bot.setWebhook({ url, secret_token: c.env.TELEGRAM_WEBHOOK_SECRET, allowed_updates: ALLOWED_UPDATES });
+  if (!hook.ok) return c.json({ error: `Telegram setWebhook: ${hook.description}` }, 502);
+  const r = await bot.setMyCommands({ commands: BOT_COMMANDS });
+  if (!r.ok) return c.json({ error: `Telegram setMyCommands: ${r.description}` }, 502);
+  return c.json({ ok: true, webhook: url, commands: BOT_COMMANDS.map((b) => b.command) });
 });
 
 // ---------- day / tasks ----------

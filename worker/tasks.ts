@@ -52,9 +52,9 @@ export async function deleteTask(db: D1Database, userId: number, id: number): Pr
 }
 
 /** Unscheduled capture: inbox = 1, date = NULL. */
-export async function captureToInbox(db: D1Database, userId: number, title: string): Promise<{ id: number; title: string }> {
-  const row = await db.prepare("INSERT INTO tasks (user_id, title, date, inbox) VALUES (?, ?, NULL, 1) RETURNING id, title")
-    .bind(userId, title).first<{ id: number; title: string }>();
+export async function captureToInbox(db: D1Database, userId: number, title: string, notes = ""): Promise<{ id: number; title: string }> {
+  const row = await db.prepare("INSERT INTO tasks (user_id, title, date, inbox, notes) VALUES (?, ?, NULL, 1, ?) RETURNING id, title")
+    .bind(userId, title, notes).first<{ id: number; title: string }>();
   if (!row) throw new Error("capture failed");
   return row;
 }
