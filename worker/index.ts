@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import { hashPassword, verifyPassword, newSessionToken, sessionCookie, SESSION_COOKIE, SESSION_DAYS } from "./auth.ts";
 import { chatComplete, extractProposals, type ChatMsg } from "./guide.ts";
-import { carryOver } from "./tasks.ts";
+import { carryOver, deleteTask, updateTask } from "./tasks.ts";
 import type { GoalLevel, GuideProposal, ReviewPeriod } from "../shared/types.ts";
 
 export interface Env {
@@ -239,9 +239,6 @@ app.put("/api/day/:date", async (c) => {
   return c.json({ ok: true });
 });
 
-const TASK_FIELDS = ["title", "description", "date", "inbox", "priority", "energy", "estimate_min", "actual_min",
-  "start_min", "end_min", "goal_id", "project_id", "repeat", "notes", "done", "dropped"] as const;
-
 app.post("/api/tasks", async (c) => {
   const userId = c.get("userId");
   const b = await c.req.json<Record<string, unknown>>();
@@ -263,21 +260,12 @@ app.put("/api/tasks/:id", async (c) => {
   const userId = c.get("userId");
   const id = Number(c.req.param("id"));
   const b = await c.req.json<Record<string, unknown>>();
-  for (const f of TASK_FIELDS) {
-    if (f in b) {
-      await c.env.DB.prepare(`UPDATE tasks SET ${f} = ? WHERE id = ? AND user_id = ?`).bind(b[f], id, userId).run();
-    }
-  }
-  if ("done" in b) {
-    await c.env.DB.prepare("UPDATE tasks SET done_at = CASE WHEN done = 1 THEN datetime('now') ELSE NULL END WHERE id = ? AND user_id = ?")
-      .bind(id, userId).run();
-  }
-  const row = await c.env.DB.prepare("SELECT * FROM tasks WHERE id = ? AND user_id = ?").bind(id, userId).first();
+  const row = await updateTask(c.env.DB, userId, id, b);
   return c.json({ task: row });
 });
 
 app.delete("/api/tasks/:id", async (c) => {
-  await c.env.DB.prepare("DELETE FROM tasks WHERE id = ? AND user_id = ?").bind(Number(c.req.param("id")), c.get("userId")).run();
+  await deleteTask(c.env.DB, c.get("userId"), Number(c.req.param("id")));
   return c.json({ ok: true });
 });
 
