@@ -6,6 +6,9 @@ import {
   PENDING_COOKIE, SESSION_COOKIE, SESSION_DAYS,
 } from "./auth.ts";
 import { guideChat } from "./guide.ts";
+import { addDays, periodRange, reviewPeriodEnd, reviewPeriodStart, weekStartOf } from "./dates.ts";
+import { applyProposal } from "./proposals.ts";
+import { createUser, isTelegramOnlyEmail } from "./users.ts";
 import { carryOver, deleteTask, materializeRepeats, updateTask } from "./tasks.ts";
 import { updateDay } from "./days.ts";
 import { upsertReview, type ReviewInput } from "./reviews.ts";
@@ -21,7 +24,7 @@ import { verifyWidgetLogin } from "./telegram/widget.ts";
 import { claimUpdate, handleUpdate, isUpdate, secretTokenOk, SECRET_HEADER } from "./telegram/webhook.ts";
 import { BadInput, coerceFields, dateOrNull, idOrNull, int, nonEmptyText, oneOf, text, type FieldSpecs } from "./validate.ts";
 import type {
-  GoalLevel, GoalStatus, GoalType, GuideProposal, Priority, ReviewPeriod, SecuritySettings,
+  GoalLevel, GoalStatus, GoalType, GuideProposal, Priority, SecuritySettings,
   TelegramLinkStart, TelegramPrefs, TelegramSettings, User,
 } from "../shared/types.ts";
 
@@ -43,74 +46,23 @@ export interface Env {
   TG_FLOOD_LIMITER?: RateLimit;
 }
 
+const GOAL_LEVELS: GoalLevel[] = ["lifetime", "year", "quarter", "month", "week"];
+
 type Vars = { userId: number };
 const app = new Hono<{ Bindings: Env; Variables: Vars }>();
 
-const DEFAULT_AREAS: [string, string][] = [
-  ["Health", "#6b9080"],
-  ["Family", "#c98a6d"],
-  ["Career", "#5c7a99"],
-  ["Wealth", "#b98a3c"],
-  ["Learning", "#7d6b99"],
-  ["Relationships", "#a86458"],
-  ["Inner Growth", "#4d7048"],
-  ["Lifestyle", "#c0a161"],
-  ["Contribution", "#699099"],
-];
-
-const GOAL_LEVELS: GoalLevel[] = ["lifetime", "year", "quarter", "month", "week"];
-const REVIEW_PERIODS: ReviewPeriod[] = ["daily", "weekly", "monthly", "quarterly", "yearly"];
 
 // ---------- helpers ----------
 
-function isoDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
-}
-
-/** Today in the user's timezone (users.timezone; NULL = UTC). SELECT * keeps this working before migration 0002. */
+/** Today in the user's timezone (users.timezone; NULL = UTC). */
 async function todayFor(db: D1Database, userId: number): Promise<string> {
-  const row = await db.prepare("SELECT * FROM users WHERE id = ?").bind(userId).first<{ timezone?: string | null }>();
+  const row = await db.prepare("SELECT timezone FROM users WHERE id = ?").bind(userId).first<{ timezone: string | null }>();
   return userToday(row?.timezone);
 }
 
 function assertDate(s: unknown): string {
   if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) throw new Error("bad date");
   return s;
-}
-
-/** Monday of the week containing date. */
-function weekStartOf(dateStr: string): string {
-  const d = new Date(dateStr + "T00:00:00Z");
-  const dow = (d.getUTCDay() + 6) % 7; // Mon=0
-  d.setUTCDate(d.getUTCDate() - dow);
-  return isoDate(d);
-}
-
-function addDays(dateStr: string, n: number): string {
-  const d = new Date(dateStr + "T00:00:00Z");
-  d.setUTCDate(d.getUTCDate() + n);
-  return isoDate(d);
-}
-
-function periodRange(view: string, anchor: string): { start: string; end: string } {
-  const d = new Date(anchor + "T00:00:00Z");
-  const y = d.getUTCFullYear();
-  if (view === "week") {
-    const start = weekStartOf(anchor);
-    return { start, end: addDays(start, 6) };
-  }
-  if (view === "month") {
-    const start = `${y}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-01`;
-    const endD = new Date(Date.UTC(y, d.getUTCMonth() + 1, 0));
-    return { start, end: isoDate(endD) };
-  }
-  if (view === "quarter") {
-    const q = Math.floor(d.getUTCMonth() / 3);
-    const start = isoDate(new Date(Date.UTC(y, q * 3, 1)));
-    const end = isoDate(new Date(Date.UTC(y, q * 3 + 3, 0)));
-    return { start, end };
-  }
-  return { start: `${y}-01-01`, end: `${y}-12-31` };
 }
 
 // ---------- auth ----------
@@ -140,16 +92,9 @@ app.post("/api/auth/register", async (c) => {
   const exists = await c.env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email.toLowerCase()).first();
   if (exists) return c.json({ error: "An account with this email already exists." }, 409);
 
-  const hash = await hashPassword(password);
-  const user = await c.env.DB.prepare("INSERT INTO users (email, name, password_hash) VALUES (?, ?, ?) RETURNING id")
-    .bind(email.toLowerCase(), name?.trim() || email.split("@")[0], hash)
-    .first<{ id: number }>();
-  const userId = user!.id;
-
-  const seed = DEFAULT_AREAS.map(([n, color], i) =>
-    c.env.DB.prepare("INSERT INTO areas (user_id, name, color, sort) VALUES (?, ?, ?, ?)").bind(userId, n, color, i)
-  );
-  await c.env.DB.batch(seed);
+  const userId = await createUser(c.env.DB, {
+    email: email.toLowerCase(), name: name?.trim() || email.split("@")[0], passwordHash: await hashPassword(password),
+  });
 
   const token = newSessionToken();
   const expires = new Date(Date.now() + SESSION_DAYS * 86400_000).toISOString();
@@ -265,8 +210,9 @@ app.get("/api/me", async (c) => {
     .bind(c.get("userId"))
     .first<{ id: number; email: string; name: string; direction: string; timezone?: string | null; password_login_disabled?: number }>();
   const user: User | null = row && {
-    id: row.id, email: row.email, name: row.name, direction: row.direction,
+    id: row.id, email: isTelegramOnlyEmail(row.email) ? "" : row.email, name: row.name, direction: row.direction,
     timezone: row.timezone ?? null, password_login_disabled: !!row.password_login_disabled,
+    telegram_only: isTelegramOnlyEmail(row.email),
   };
   return c.json({ user });
 });
@@ -347,9 +293,14 @@ app.get("/api/telegram", async (c) => {
     prefs: {
       morning_at: prefs?.morning_at ?? null,
       review_at: prefs?.review_at ?? null,
+      weekly_plan_at: prefs?.weekly_plan_at ?? null,
+      weekly_review_at: prefs?.weekly_review_at ?? null,
+      checkin_at: prefs?.checkin_at ?? null,
       quiet_from: prefs?.quiet_from ?? null,
       quiet_to: prefs?.quiet_to ?? null,
       nudges: prefs?.nudges ? 1 : 0,
+      block_reminders: prefs?.block_reminders ? 1 : 0,
+      streaks: prefs?.streaks ? 1 : 0,
     },
   };
   return c.json({ telegram });
@@ -470,7 +421,7 @@ app.post("/api/telegram/setup", async (c) => {
 
 app.get("/api/day", async (c) => {
   const userId = c.get("userId");
-  const date = assertDate(c.req.query("date") ?? isoDate(new Date()));
+  const date = assertDate(c.req.query("date") ?? await todayFor(c.env.DB, userId));
   await materializeRepeats(c.env.DB, userId, date);
 
   const day =
@@ -686,7 +637,7 @@ app.get("/api/projects/:id/tasks", async (c) => {
 app.get("/api/timeline", async (c) => {
   const userId = c.get("userId");
   const view = c.req.query("view") ?? "week";
-  const anchor = assertDate(c.req.query("anchor") ?? isoDate(new Date()));
+  const anchor = assertDate(c.req.query("anchor") ?? await todayFor(c.env.DB, userId));
   const { start, end } = periodRange(view, anchor);
 
   const stats = await c.env.DB.prepare(
@@ -733,29 +684,6 @@ app.put("/api/weekly-plan/:weekStart", async (c) => {
 });
 
 // ---------- reviews ----------
-
-function reviewPeriodStart(period: string, todayStr: string): string {
-  const d = new Date(todayStr + "T00:00:00Z");
-  const y = d.getUTCFullYear();
-  switch (period) {
-    case "daily": return todayStr;
-    case "weekly": return weekStartOf(todayStr);
-    case "monthly": return `${y}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-01`;
-    case "quarterly": return isoDate(new Date(Date.UTC(y, Math.floor(d.getUTCMonth() / 3) * 3, 1)));
-    default: return `${y}-01-01`;
-  }
-}
-
-function reviewPeriodEnd(period: string, startStr: string): string {
-  const d = new Date(startStr + "T00:00:00Z");
-  switch (period) {
-    case "daily": return startStr;
-    case "weekly": return addDays(startStr, 6);
-    case "monthly": return isoDate(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)));
-    case "quarterly": return isoDate(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 3, 0)));
-    default: return `${d.getUTCFullYear()}-12-31`;
-  }
-}
 
 app.get("/api/reviews", async (c) => {
   const userId = c.get("userId");
@@ -868,105 +796,10 @@ app.post("/api/guide/chat", async (c) => {
 });
 
 app.post("/api/guide/apply", async (c) => {
-  const userId = c.get("userId");
   const { proposal } = await c.req.json<{ proposal: GuideProposal }>();
-  const db = c.env.DB;
-  const isDate = (s: unknown) => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
-
-  if (proposal.kind === "create_goal") {
-    if (proposal.level !== undefined && !GOAL_LEVELS.includes(proposal.level)) {
-      return c.json({ error: `unknown goal level "${proposal.level}"` }, 400);
-    }
-    let areaId: number | null = null;
-    if (proposal.area) {
-      const a = await db.prepare("SELECT id FROM areas WHERE user_id = ? AND name = ? AND archived = 0").bind(userId, proposal.area).first<{ id: number }>();
-      areaId = a?.id ?? null;
-    }
-    let parentId: number | null = null;
-    if (proposal.parent_title) {
-      const p = await db.prepare("SELECT id FROM goals WHERE user_id = ? AND title = ?").bind(userId, proposal.parent_title).first<{ id: number }>();
-      parentId = p?.id ?? null;
-    }
-    await db.prepare(
-      "INSERT INTO goals (user_id, title, level, area_id, parent_id, target_date, success_criteria, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    ).bind(userId, proposal.title, proposal.level ?? "quarter", areaId, parentId, proposal.target_date ?? null,
-           proposal.success_criteria ?? "", proposal.description ?? "").run();
-    return c.json({ ok: true, applied: "goal" });
-  }
-
-  if (proposal.kind === "create_task") {
-    let goalId: number | null = null;
-    if (proposal.goal_title) {
-      const g = await db.prepare("SELECT id FROM goals WHERE user_id = ? AND title = ?").bind(userId, proposal.goal_title).first<{ id: number }>();
-      goalId = g?.id ?? null;
-    }
-    let startMin: number | null = null;
-    let endMin: number | null = null;
-    if (proposal.start && /^\d{2}:\d{2}$/.test(proposal.start)) {
-      const [h, m] = proposal.start.split(":").map(Number);
-      startMin = h * 60 + m;
-      endMin = startMin + (proposal.estimate_min ?? 45);
-    }
-    await db.prepare(
-      "INSERT INTO tasks (user_id, title, date, estimate_min, start_min, end_min, goal_id) VALUES (?, ?, ?, ?, ?, ?, ?)"
-    ).bind(userId, proposal.title, assertDate(proposal.date), proposal.estimate_min ?? null, startMin, endMin, goalId).run();
-    return c.json({ ok: true, applied: "task" });
-  }
-
-  if (proposal.kind === "set_top_three") {
-    const date = assertDate(proposal.date);
-    const [t1, t2, t3] = [...proposal.outcomes, "", "", ""].slice(0, 3);
-    await db.prepare(
-      `INSERT INTO days (user_id, date, top1, top2, top3) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT (user_id, date) DO UPDATE SET top1 = excluded.top1, top2 = excluded.top2, top3 = excluded.top3`
-    ).bind(userId, date, t1, t2, t3).run();
-    return c.json({ ok: true, applied: "top_three" });
-  }
-
-  if (proposal.kind === "set_weekly_plan") {
-    if (!isDate(proposal.week_start)) return c.json({ error: "bad week_start date" }, 400);
-    if (!Array.isArray(proposal.outcomes)) return c.json({ error: "outcomes must be a list" }, 400);
-    const weekStart = weekStartOf(proposal.week_start);
-    const [o1, o2, o3] = [...proposal.outcomes, "", "", ""].slice(0, 3).map(String);
-    // Commitments and risks are left as the user wrote them.
-    await db.prepare(
-      `INSERT INTO weekly_plans (user_id, week_start, theme, outcome1, outcome2, outcome3) VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT (user_id, week_start) DO UPDATE SET
-         theme = excluded.theme, outcome1 = excluded.outcome1, outcome2 = excluded.outcome2, outcome3 = excluded.outcome3`
-    ).bind(userId, weekStart, String(proposal.theme ?? ""), o1, o2, o3).run();
-    return c.json({ ok: true, applied: "weekly_plan" });
-  }
-
-  if (proposal.kind === "update_goal_progress") {
-    const progress = Number(proposal.progress);
-    if (!Number.isFinite(progress) || progress < 0 || progress > 100) {
-      return c.json({ error: "progress must be a number from 0 to 100" }, 400);
-    }
-    const g = typeof proposal.goal_title === "string"
-      ? await db.prepare("SELECT id FROM goals WHERE user_id = ? AND title = ?").bind(userId, proposal.goal_title).first<{ id: number }>()
-      : null;
-    if (!g) return c.json({ error: `no goal titled "${proposal.goal_title}"` }, 404);
-    await db.prepare("UPDATE goals SET progress = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?")
-      .bind(Math.round(progress), g.id, userId).run();
-    return c.json({ ok: true, applied: "goal_progress" });
-  }
-
-  if (proposal.kind === "create_review") {
-    if (!REVIEW_PERIODS.includes(proposal.period)) return c.json({ error: `unknown review period "${proposal.period}"` }, 400);
-    if (!isDate(proposal.period_start)) return c.json({ error: "bad period_start date" }, 400);
-    const answers = proposal.answers;
-    if (!answers || typeof answers !== "object" || Array.isArray(answers)) return c.json({ error: "answers must be an object" }, 400);
-    const periodStart = reviewPeriodStart(proposal.period, proposal.period_start);
-    // Merge into an existing review so answers the user already wrote survive.
-    await db.prepare(
-      `INSERT INTO reviews (user_id, period, period_start, answers) VALUES (?, ?, ?, ?)
-       ON CONFLICT (user_id, period, period_start) DO UPDATE SET answers = json_patch(reviews.answers, excluded.answers)`
-    ).bind(userId, proposal.period, periodStart,
-           JSON.stringify(Object.fromEntries(Object.entries(answers).map(([q, a]) => [q, String(a ?? "")])))).run();
-    return c.json({ ok: true, applied: "review" });
-  }
-
-  return c.json({ error: "unknown proposal kind" }, 400);
+  const r = await applyProposal(c.env.DB, c.get("userId"), proposal);
+  if (!r.ok) return c.json({ error: r.error }, r.status);
+  return c.json({ ok: true, applied: r.applied });
 });
 
 // ---------- fallback ----------

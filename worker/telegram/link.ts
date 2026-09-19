@@ -19,6 +19,7 @@
 
 import type { TelegramLinkStatus } from "../../shared/types.ts";
 import { cb } from "./callback.ts";
+import { PREFS_SEED_SQL } from "./prefs.ts";
 import type { Reply, TgMessage } from "./router.ts";
 
 export const LINK_TTL_SECONDS = 300;
@@ -104,7 +105,7 @@ export async function redeemLink(env: LinkEnv, args: string, message: TgMessage)
            telegram_user_id = excluded.telegram_user_id, chat_id = excluded.chat_id,
            username = excluded.username, first_name = excluded.first_name, paused_until = NULL`
       ).bind(userId, from.id, message.chat.id, from.username ?? null, from.first_name ?? null),
-      db.prepare("INSERT OR IGNORE INTO telegram_prefs (user_id) VALUES (?)").bind(userId),
+      db.prepare(PREFS_SEED_SQL).bind(userId),
     ]);
   } catch (e) {
     // Lost a race with another account linking the same Telegram identity.
