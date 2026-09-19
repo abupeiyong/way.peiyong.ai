@@ -710,3 +710,11 @@ textarea.ruled:focus { box-shadow: none; }
 .row { display: flex; align-items: center; gap: 10px; }
 .spread { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .stack { display: flex; flex-direction: column; gap: 14px; }
+
+/* Settings → Telegram: delivery & engagement numbers */
+.tg-stats { margin-top: 6px; }
+.tg-stats-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+.tg-stats-table td { padding: 4px 8px 4px 0; border-top: 1px solid var(--line); color: var(--ink-soft); }
+.tg-stats-table td:first-child { color: var(--ink); white-space: nowrap; }
+.auth-deeplink { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; justify-content: center; }
+.auth-deeplink .qr { flex: none; border: 1px solid var(--line); border-radius: 4px; }

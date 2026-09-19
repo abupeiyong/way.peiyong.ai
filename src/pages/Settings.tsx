@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.ts";
 import type {
-  Area, SecuritySettings, TelegramLinkStart, TelegramLinkStatus, TelegramPrefs, TelegramSettings,
+  Area, SecuritySettings, TelegramLinkStart, TelegramLinkStatus, TelegramPrefs, TelegramSettings, TelegramStats,
 } from "../../shared/types.ts";
 import { useApp } from "../App.tsx";
 import { Icon } from "../components/Icon.tsx";
@@ -32,6 +32,8 @@ export default function Settings() {
   // The link in progress (deep link + QR) and where the bot says it stands.
   const [link, setLink] = useState<TelegramLinkStart | null>(null);
   const [linkState, setLinkState] = useState<TelegramLinkStatus["state"]>("pending");
+  // Last 28 days of delivery/engagement numbers (PRD §14); null until the account is linked.
+  const [stats, setStats] = useState<TelegramStats | null>(null);
 
   // The "use this browser's zone" banner can change it while this page is open.
   useEffect(() => { setTimezone(user.timezone ?? ""); }, [user.timezone]);
@@ -47,6 +49,8 @@ export default function Settings() {
       .then((r) => {
         setTelegram(r.telegram);
         setTgDraft(r.telegram.prefs);
+        if (r.telegram.linked) api.get<{ stats: TelegramStats }>("/api/telegram/stats").then((x) => setStats(x.stats)).catch(() => setStats(null));
+        else setStats(null);
       })
       .catch(() => setTelegram(null));
   useEffect(() => { loadTelegram(); }, []);
@@ -170,7 +174,7 @@ export default function Settings() {
           </div>
           <div>
             <label className="field-label">Email</label>
-            <input className="input" value={user.email} disabled style={{ opacity: 0.6 }} />
+            <input className="input" value={user.telegram_only ? "— Telegram 账号 · Telegram-only account" : user.email} disabled style={{ opacity: 0.6 }} />
           </div>
           <div>
             <label className="field-label">时区 Time zone</label>
@@ -325,6 +329,23 @@ export default function Settings() {
               </div>
               <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-end" }}>
                 <div>
+                  <label className="field-label">周一计划 Monday plan</label>
+                  <input className="input" type="time" value={tgDraft.weekly_plan_at ?? ""}
+                         onChange={(e) => setTgDraft({ ...tgDraft, weekly_plan_at: e.target.value || null })} />
+                </div>
+                <div>
+                  <label className="field-label">周日复盘 Sunday review</label>
+                  <input className="input" type="time" value={tgDraft.weekly_review_at ?? ""}
+                         onChange={(e) => setTgDraft({ ...tgDraft, weekly_review_at: e.target.value || null })} />
+                </div>
+                <div>
+                  <label className="field-label">月初领域打分 Monthly check-in</label>
+                  <input className="input" type="time" value={tgDraft.checkin_at ?? ""}
+                         onChange={(e) => setTgDraft({ ...tgDraft, checkin_at: e.target.value || null })} />
+                </div>
+              </div>
+              <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-end" }}>
+                <div>
                   <label className="field-label">免打扰 Quiet from</label>
                   <input className="input" type="time" value={tgDraft.quiet_from ?? ""}
                          onChange={(e) => setTgDraft({ ...tgDraft, quiet_from: e.target.value || null })} />
@@ -335,12 +356,32 @@ export default function Settings() {
                          onChange={(e) => setTgDraft({ ...tgDraft, quiet_to: e.target.value || null })} />
                 </div>
               </div>
+              {quietSwallows(tgDraft) && (
+                <p className="small" style={{ color: "var(--red)" }}>
+                  免打扰时段盖住了{quietSwallows(tgDraft)}，那条消息将永远不会发出。<br />
+                  Quiet hours cover {quietSwallows(tgDraft)} — that message would never be sent.
+                </p>
+              )}
               <label className="row small" style={{ cursor: "pointer" }}>
                 <button type="button" className={`checkbox${tgDraft.nudges ? " checked" : ""}`} aria-label="Toggle nudges"
                         onClick={() => setTgDraft({ ...tgDraft, nudges: tgDraft.nudges ? 0 : 1 })}>
                   {tgDraft.nudges ? <Icon name="check" /> : null}
                 </button>
-                提醒 · Nudges during the day
+                中午提醒 · Midday nudge when the top three is still empty (11:00)
+              </label>
+              <label className="row small" style={{ cursor: "pointer" }}>
+                <button type="button" className={`checkbox${tgDraft.block_reminders ? " checked" : ""}`} aria-label="Toggle block reminders"
+                        onClick={() => setTgDraft({ ...tgDraft, block_reminders: tgDraft.block_reminders ? 0 : 1 })}>
+                  {tgDraft.block_reminders ? <Icon name="check" /> : null}
+                </button>
+                时间块提醒 · A reminder 5 minutes before each scheduled block
+              </label>
+              <label className="row small" style={{ cursor: "pointer" }}>
+                <button type="button" className={`checkbox${tgDraft.streaks ? " checked" : ""}`} aria-label="Toggle streaks"
+                        onClick={() => setTgDraft({ ...tgDraft, streaks: tgDraft.streaks ? 0 : 1 })}>
+                  {tgDraft.streaks ? <Icon name="check" /> : null}
+                </button>
+                连续天数 · Show the review streak in the Sunday recap
               </label>
               <p className="muted mini">
                 留空即关闭。时间按档案里的时区（{user.timezone || "UTC"}）。<br />
@@ -349,6 +390,28 @@ export default function Settings() {
               <div>
                 <button className="btn" onClick={saveTelegram}>Save Telegram settings</button>
               </div>
+              {stats && (
+                <div className="tg-stats">
+                  <div className="field-label">最近 {stats.days} 天 · Last {stats.days} days</div>
+                  <table className="tg-stats-table">
+                    <tbody>
+                      {stats.kinds.map((k) => (
+                        <tr key={k.kind}>
+                          <td>{KIND_LABELS[k.kind] ?? k.kind}</td>
+                          <td>{k.sent} 发 · sent</td>
+                          <td>{k.replied} 回 · replied</td>
+                          <td>{k.reply_rate === null ? "—" : `${Math.round(k.reply_rate * 100)}%`}</td>
+                        </tr>
+                      ))}
+                      <tr><td>闭环天数 · Loop days</td><td colSpan={3}>{stats.loop_days} / {stats.days}（三件事 + 复盘 · top three + review）</td></tr>
+                      <tr><td>收集 · Captured</td><td colSpan={3}>{stats.captured} Telegram · {stats.web_captured} web</td></tr>
+                      {(stats.blocked || stats.rate_limited || stats.errors) ? (
+                        <tr><td>投递 · Delivery</td><td colSpan={3}>{stats.blocked} blocked · {stats.rate_limited} rate-limited · {stats.errors} errors</td></tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           )}
           {tgError && <p className="small" style={{ color: "var(--red)", marginTop: 8 }}>{tgError}</p>}
@@ -425,6 +488,22 @@ export default function Settings() {
       </p>
     </div>
   );
+}
+
+const KIND_LABELS: Record<string, string> = {
+  morning: "晨报 Morning", review_prompt: "晚间复盘 Evening review", weekly_plan: "周一计划 Monday plan",
+  weekly_review: "周日复盘 Sunday review", midday_nudge: "中午提醒 Nudge", area_checkin: "领域打分 Check-in", block: "时间块 Blocks",
+};
+
+/** The scheduled message quiet hours would swallow, or "" — the scheduler skips every kind inside them. */
+function quietSwallows(p: TelegramPrefs): string {
+  const min = (v: string | null) => (v && /^\d{2}:\d{2}$/.test(v) ? Number(v.slice(0, 2)) * 60 + Number(v.slice(3)) : null);
+  const f = min(p.quiet_from), t = min(p.quiet_to);
+  if (f === null || t === null || f === t) return "";
+  const inside = (m: number) => (f < t ? m >= f && m < t : m >= f || m < t);
+  const slots: [string, string | null][] = [["晨报 morning", p.morning_at], ["晚间复盘 evening review", p.review_at],
+    ["周一计划 Monday plan", p.weekly_plan_at], ["周日复盘 Sunday review", p.weekly_review_at], ["月初打分 check-in", p.checkin_at]];
+  return slots.filter(([, v]) => { const m = min(v); return m !== null && inside(m); }).map(([n]) => n).join("、");
 }
 
 /** Every IANA zone the browser knows, plus `current` if it is not among them (and not empty). */
