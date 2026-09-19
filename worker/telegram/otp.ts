@@ -10,7 +10,7 @@
 // with expires_at in SQLite datetime() format; telegram_accounts(user_id, chat_id, verified_login).
 
 import { newOtpCode, timingSafeEqual } from "../auth.ts";
-import { sendMessage } from "./schedule.ts";
+import { sendReply, TelegramBot } from "./api.ts";
 
 export const OTP_TTL_SECONDS = 300;
 export const OTP_MAX_ATTEMPTS = 5;
@@ -32,7 +32,7 @@ export async function issueOtp(db: D1Database, botToken: string | undefined, ema
     ).bind(code, account.user_id, browserToken, `+${OTP_TTL_SECONDS} seconds`),
   ]);
   try {
-    await sendMessage(botToken, account.chat_id, {
+    await sendReply(new TelegramBot(botToken), account.chat_id, {
       text: `Your Way code: ${code.slice(0, 3)} ${code.slice(3)}\nIt expires in 5 minutes. Didn't ask for it? Ignore this message.`,
     });
   } catch (e) {

@@ -9,6 +9,7 @@
 
 import { underLimit } from "../auth.ts";
 import { captureToInbox } from "../tasks.ts";
+import type { ReplyMarkup } from "./api.ts";
 import { cb } from "./callback.ts";
 
 // ---------- the slice of the Bot API update shape the router reads ----------
@@ -41,25 +42,12 @@ export interface TgUpdate {
   callback_query?: TgCallbackQuery;
 }
 
-export type InlineKeyboardButton =
-  | { text: string; callback_data: string }
-  /** Opens the URL in the browser; no callback query comes back. */
-  | { text: string; url: string };
+export type { ForceReply, InlineKeyboardButton, InlineKeyboardMarkup } from "./api.ts";
 
-export interface InlineKeyboardMarkup {
-  inline_keyboard: InlineKeyboardButton[][];
-}
-
-/** Opens the reply keyboard on the client. A message carries this or an inline keyboard, never both. */
-export interface ForceReply {
-  force_reply: true;
-  /** Up to 64 characters. */
-  input_field_placeholder?: string;
-}
-
+/** Plain text (escaped on the way out by sendReply / editReply in api.ts). */
 export interface Reply {
   text: string;
-  reply_markup?: InlineKeyboardMarkup | ForceReply;
+  reply_markup?: ReplyMarkup;
 }
 
 // ---------- routing ----------

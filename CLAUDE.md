@@ -17,6 +17,8 @@ npm run db:migrate:local    # apply migrations/ to the local D1 used by `npm run
 npm run db:migrate:remote   # apply migrations/ to the production D1 (way-preview-db)
 npx wrangler secret put OPENAI_API_KEY --name way   # optional: upgrade Guide from Workers AI to an OpenAI-compatible model
 npx wrangler secret put TELEGRAM_WEBHOOK_SECRET --name way   # then setWebhook with the same secret_token (see worker/telegram/webhook.ts)
+TELEGRAM_WEBHOOK_SECRET=... npm run telegram:setup   # after a deploy: installs the bot's / command menu (POST /api/telegram/setup)
+npm run check:telegram      # unit-ish checks for worker/telegram/api.ts (esc, callback_data, 4096 guard, 403/429 results); fetch is stubbed
 ```
 
 - Local dev has **no Workers AI binding** (`wrangler.dev.jsonc` omits `ai`), so `/api/guide/chat` returns 502 locally unless you put `OPENAI_API_KEY=...` in a gitignored `.dev.vars`.

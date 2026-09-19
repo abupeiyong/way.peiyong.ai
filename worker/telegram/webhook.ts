@@ -14,16 +14,18 @@
 // Registration (once per bot): wrangler secret put TELEGRAM_WEBHOOK_SECRET, then
 //   https://api.telegram.org/bot<token>/setWebhook?url=https://way.peiyong.ai/api/telegram/webhook
 //     &secret_token=<the same secret>&allowed_updates=["message","callback_query"]
+// Every Bot API call goes through api.ts.
 
 import { timingSafeEqual } from "../auth.ts";
 import type { GuideEnv } from "../guide.ts";
+import { editReply, orThrow, sendReply, TelegramBot } from "./api.ts";
 import { handleCallback, type CallbackContext } from "./callback.ts";
 import { redeemLink } from "./link.ts";
 import { interruptReview, reviewAnswer } from "./review.ts";
 import {
-  captureMessage, floodGuard, parseCommand, routeUpdate, SLOW_DOWN, type Reply, type TgMessage, type TgUpdate,
+  captureMessage, floodGuard, parseCommand, routeUpdate, SLOW_DOWN, type Reply, type TgUpdate,
 } from "./router.ts";
-import { localDate, sendMessage, TelegramApiError } from "./schedule.ts";
+import { localDate } from "./schedule.ts";
 import { d1StateStore } from "./state.ts";
 import { topThreeAnswer } from "./topthree.ts";
 
@@ -74,32 +76,6 @@ function notYet(name: string): Reply {
   return { text: `暂不支持 /${name} · /${name} isn't available yet.` };
 }
 
-// ---------- Bot API ----------
-
-async function callBot(token: string, method: string, body: object): Promise<void> {
-  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (res.ok) return;
-  const b = await res.json().catch(() => ({})) as { description?: string; parameters?: { retry_after?: number } };
-  throw new TelegramApiError(res.status, b.description ?? res.statusText, b.parameters?.retry_after);
-}
-
-/** Edit a message in place; no reply_markup removes its buttons. Editing to identical content is not an error. */
-async function editMessage(token: string, message: TgMessage, reply: Reply): Promise<void> {
-  try {
-    await callBot(token, "editMessageText", {
-      chat_id: message.chat.id, message_id: message.message_id, text: reply.text,
-      ...(reply.reply_markup && { reply_markup: reply.reply_markup }),
-    });
-  } catch (e) {
-    if (e instanceof TelegramApiError && e.description.includes("message is not modified")) return;
-    throw e;
-  }
-}
-
 // ---------- the update ----------
 
 function todayIn(timeZone: string | null): string {
@@ -112,9 +88,11 @@ function todayIn(timeZone: string | null): string {
 
 /** Everything after the dedupe; runs inside waitUntil. Never throws. */
 export async function handleUpdate(env: WebhookEnv, update: TgUpdate, origin: string): Promise<void> {
-  const token = env.TELEGRAM_BOT_TOKEN;
-  if (!token) {
-    console.error("telegram webhook: TELEGRAM_BOT_TOKEN is not set");
+  let bot: TelegramBot;
+  try {
+    bot = TelegramBot.fromEnv(env);
+  } catch (e) {
+    console.error("telegram webhook:", e);
     return;
   }
   const query = update.callback_query;
@@ -122,18 +100,18 @@ export async function handleUpdate(env: WebhookEnv, update: TgUpdate, origin: st
   // A tap on a message too old to be delivered with the query still has a private chat: the user's own id.
   const chatId = update.message?.chat.id ?? query?.message?.chat.id ?? from?.id;
   if (!from || chatId === undefined) return;
-  const send = (reply: Reply) => sendMessage(token, chatId, reply);
+  const send = (reply: Reply) => sendReply(bot, chatId, reply);
   try {
-    await dispatch(env, token, update, from.id, send, origin);
+    await dispatch(env, bot, update, from.id, send, origin);
   } catch (e) {
     console.error(`telegram webhook: update ${update.update_id} failed`, e);
-    if (query) await callBot(token, "answerCallbackQuery", { callback_query_id: query.id }).catch(() => {});
+    if (query) await bot.answerCallbackQuery({ callback_query_id: query.id });
     await send(ERROR).catch((err) => console.error("telegram webhook: error reply failed", err));
   }
 }
 
 async function dispatch(
-  env: WebhookEnv, token: string, update: TgUpdate, telegramUserId: number,
+  env: WebhookEnv, bot: TelegramBot, update: TgUpdate, telegramUserId: number,
   send: (reply: Reply) => Promise<void>, origin: string,
 ): Promise<void> {
   const db = env.DB;
@@ -142,7 +120,7 @@ async function dispatch(
   const answer = async (text?: string) => {
     if (!query || answered) return;
     answered = true;
-    await callBot(token, "answerCallbackQuery", { callback_query_id: query.id, ...(text && { text }) });
+    orThrow(await bot.answerCallbackQuery({ callback_query_id: query.id, ...(text && { text }) }));
   };
 
   // `/start link_<nonce>` comes from someone with no Way user yet (or re-linking), so it runs before resolution.
@@ -174,8 +152,8 @@ async function dispatch(
     state: d1StateStore(db, userId),
     guide: env,
     answer,
-    finish: (text) => (tapped ? editMessage(token, tapped, { text }) : send({ text })),
-    edit: (reply) => (tapped ? editMessage(token, tapped, reply) : send(reply)),
+    finish: (text) => (tapped ? editReply(bot, tapped.chat.id, tapped.message_id, { text }) : send({ text })),
+    edit: (reply) => (tapped ? editReply(bot, tapped.chat.id, tapped.message_id, reply) : send(reply)),
     send,
   };
 

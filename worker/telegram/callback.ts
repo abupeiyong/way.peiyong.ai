@@ -12,7 +12,9 @@ import { proposalAnswer, topThreeButton } from "./topthree.ts";
 import type { Reply } from "./router.ts";
 import type { TelegramStateStore } from "./state.ts";
 
-export const CALLBACK_DATA_MAX_BYTES = 64;
+import { CALLBACK_DATA_MAX_BYTES } from "./api.ts";
+
+export { CALLBACK_DATA_MAX_BYTES };
 
 export const RATING_FIELDS = ["mood", "energy", "focus", "satisfaction"] as const;
 export type RatingField = (typeof RATING_FIELDS)[number];
