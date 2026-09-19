@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api.ts";
+import { QrCode } from "../components/QrCode.tsx";
 
 declare global {
   interface Window { onTelegramAuth?: (user: Record<string, unknown>) => void }
@@ -48,6 +49,36 @@ export default function AuthPage({ mode, nav, onAuthed }: {
   const telegram = mode === "login" && viaTelegram;
   // Username of the bot behind the Login Widget; null = not configured, so no widget.
   const [widgetBot, setWidgetBot] = useState<string | null>(null);
+  // Deep-link sign-in (PRD §5.2(b)): the pending request the page is polling, and how it ended.
+  const [deep, setDeep] = useState<{ code: string; url: string; expires_in: number } | null>(null);
+  const [deepState, setDeepState] = useState<"pending" | "denied" | "expired">("pending");
+
+  const startDeepLink = async () => {
+    setError("");
+    try {
+      setDeep(await api.post<{ code: string; url: string; expires_in: number }>("/api/auth/telegram/start"));
+      setDeepState("pending");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    }
+  };
+
+  // Poll while the request is live; the approving tap in Telegram turns the next poll into a session.
+  useEffect(() => {
+    if (!deep || deepState !== "pending") return;
+    const deadline = Date.now() + deep.expires_in * 1000;
+    let stopped = false;
+    const timer = setInterval(async () => {
+      if (Date.now() > deadline) { setDeepState("expired"); return; }
+      try {
+        const r = await api.get<{ state: "pending" | "approved" | "denied" | "expired" }>(`/api/auth/telegram/poll?code=${deep.code}`);
+        if (stopped || r.state === "pending") return;
+        if (r.state === "approved") { setDeep(null); await onAuthed(); return; }
+        setDeepState(r.state);
+      } catch { /* retried on the next tick */ }
+    }, 2000);
+    return () => { stopped = true; clearInterval(timer); };
+  }, [deep, deepState]);
 
   useEffect(() => {
     if (mode !== "login") return;
@@ -144,6 +175,28 @@ export default function AuthPage({ mode, nav, onAuthed }: {
             <div className="auth-telegram">
               <span className="auth-or">或 <i>or</i></span>
               <TelegramLogin bot={widgetBot} onAuth={widgetLogin} />
+              {!deep ? (
+                <button type="button" className="btn ghost small" onClick={startDeepLink}>在 Telegram 里确认登录 · Open Telegram to sign in</button>
+              ) : deepState === "pending" ? (
+                <div className="auth-deeplink">
+                  <QrCode value={deep.url} label="Scan to sign in with Telegram" />
+                  <div className="stack">
+                    <p className="auth-note">用手机扫码，或在这台设备上打开 Telegram，点「是我，登录」。<br />Scan with your phone, or open Telegram here and tap “Yes, sign in”.</p>
+                    <div className="row">
+                      <a className="btn small" href={deep.url} target="_blank" rel="noreferrer">Open Telegram</a>
+                      <button type="button" className="btn ghost small" onClick={() => setDeep(null)}>Cancel</button>
+                    </div>
+                    <p className="muted mini">等待确认… 五分钟内有效 · Waiting — valid for 5 minutes.</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="stack">
+                  <p className="small" style={{ color: "var(--red)" }}>
+                    {deepState === "denied" ? "在 Telegram 里被拒绝了。 · Denied in Telegram." : "登录链接已过期。 · The sign-in link expired."}
+                  </p>
+                  <button type="button" className="btn ghost small" onClick={startDeepLink}>Try again</button>
+                </div>
+              )}
             </div>
           )}
           {mode === "login" && (
