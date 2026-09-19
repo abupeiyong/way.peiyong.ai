@@ -15,6 +15,8 @@ export interface User {
   timezone: string | null;
   /** users.password_login_disabled: only Telegram can sign in to this account. */
   password_login_disabled: boolean;
+  /** Created from Telegram with no email: `email` is "" and password sign-in is off from birth. */
+  telegram_only?: boolean;
 }
 
 /** A telegram_accounts row: the Telegram identity linked to one Way account. */
@@ -44,10 +46,36 @@ export interface SecuritySettings {
 export interface TelegramPrefs {
   morning_at: string | null;
   review_at: string | null;
+  /** Monday: last week's numbers, then the theme and three outcomes. */
+  weekly_plan_at: string | null;
+  /** Sunday: the weekly recap and review. */
+  weekly_review_at: string | null;
+  /** 1st of the month: rate the life areas. */
+  checkin_at: string | null;
   quiet_from: string | null;
   quiet_to: string | null;
-  /** 0/1 */
+  /** 0/1: the midday nudge when the top three is still empty. */
   nudges: number;
+  /** 0/1: a reminder 5 minutes before each time-blocked task. */
+  block_reminders: number;
+  /** 0/1: show streaks in the weekly recap. */
+  streaks: number;
+}
+
+/** GET /api/telegram/stats — this account's delivery and engagement numbers (PRD §14). */
+export interface TelegramStats {
+  /** Days covered. */
+  days: number;
+  /** Per scheduled kind: sends, replies and the reply rate. */
+  kinds: { kind: string; sent: number; replied: number; reply_rate: number | null }[];
+  /** Days (in the window) with both a top three and a daily review. */
+  loop_days: number;
+  /** Inbox items captured from Telegram vs. created on the web. */
+  captured: number;
+  web_captured: number;
+  blocked: number;
+  rate_limited: number;
+  errors: number;
 }
 
 /** GET /api/telegram. */

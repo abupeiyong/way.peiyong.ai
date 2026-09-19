@@ -16,8 +16,14 @@ const hhmmOrNull: Coerce = (v, f) => {
 };
 
 export const TELEGRAM_PREF_FIELDS: FieldSpecs = {
-  morning_at: hhmmOrNull, review_at: hhmmOrNull, quiet_from: hhmmOrNull, quiet_to: hhmmOrNull, nudges: flag,
+  morning_at: hhmmOrNull, review_at: hhmmOrNull, weekly_plan_at: hhmmOrNull, weekly_review_at: hhmmOrNull,
+  checkin_at: hhmmOrNull, quiet_from: hhmmOrNull, quiet_to: hhmmOrNull,
+  nudges: flag, block_reminders: flag, streaks: flag,
 };
+
+/** The defaults a fresh link starts from (PRD §6). NULL columns mean off, so the row is seeded explicitly. */
+export const PREFS_SEED_SQL =
+  "INSERT OR IGNORE INTO telegram_prefs (user_id, morning_at, review_at, weekly_plan_at, weekly_review_at, checkin_at, nudges) VALUES (?, '07:30', '21:30', '09:00', '20:00', '10:00', 1)";
 
 /** An IANA zone the runtime knows, or null (= UTC). Throws BadInput otherwise. */
 export function timezoneOrNull(v: unknown): string | null {

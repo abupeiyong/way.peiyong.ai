@@ -4,6 +4,7 @@
 
 import type { GuideProposal } from "../shared/types.ts";
 import { userToday } from "./telegram/time.ts";
+import { weekStartOf } from "./dates.ts";
 
 export interface GuideEnv {
   AI?: Ai;
@@ -74,13 +75,6 @@ export function extractProposals(reply: string): { text: string; proposals: Guid
 }
 
 // ---------- one Guide turn, shared by POST /api/guide/chat and the Telegram bot ----------
-
-/** Monday of the week containing date (plain calendar math on YYYY-MM-DD). */
-function weekStartOf(dateStr: string): string {
-  const d = new Date(dateStr + "T00:00:00Z");
-  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
-  return d.toISOString().slice(0, 10);
-}
 
 /** The planning state the Guide sees, rebuilt for every message. */
 export async function guideContext(db: D1Database, userId: number): Promise<string> {
