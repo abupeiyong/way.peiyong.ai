@@ -11,6 +11,7 @@ import { updateDay } from "./days.ts";
 import { upsertReview, type ReviewInput } from "./reviews.ts";
 import { issueOtp, redeemOtp, OTP_TTL_SECONDS } from "./telegram/otp.ts";
 import { runSchedules } from "./telegram/schedule.ts";
+import { verifyWidgetLogin } from "./telegram/widget.ts";
 import { BadInput, coerceFields, dateOrNull, idOrNull, int, nonEmptyText, oneOf, text, type FieldSpecs } from "./validate.ts";
 import type { GoalLevel, GoalStatus, GoalType, GuideProposal, Priority, ReviewPeriod, SecuritySettings } from "../shared/types.ts";
 
@@ -22,6 +23,8 @@ export interface Env {
   OPENAI_BASE_URL?: string;
   OPENAI_CHAT_MODEL?: string;
   TELEGRAM_BOT_TOKEN?: string;
+  /** The shared bot's @username, without the @. Unset = the login page shows no Telegram Login Widget. */
+  TELEGRAM_BOT_USERNAME?: string;
   /** 5 attempts per IP per minute across /api/auth/* (wrangler `ratelimits`). */
   AUTH_LIMITER?: RateLimit;
   /** 10 bot messages per user per minute (wrangler `ratelimits`); see floodGuard in telegram/router.ts. */
@@ -93,6 +96,13 @@ function periodRange(view: string, anchor: string): { start: string; end: string
 }
 
 // ---------- auth ----------
+
+// Which bot the login page's Telegram Login Widget renders. Registered before the brute-force guard on
+// purpose: it reads no secret and touches no DB, so loading the login page must not spend an attempt.
+app.get("/api/auth/telegram/widget", (c) => {
+  const bot = c.env.TELEGRAM_BOT_TOKEN ? c.env.TELEGRAM_BOT_USERNAME?.replace(/^@/, "") || null : null;
+  return c.json({ bot });
+});
 
 // Brute-force guard: checked before any handler, so a rejected attempt never touches D1.
 app.use("/api/auth/*", async (c, next) => {
@@ -186,6 +196,30 @@ app.post("/api/auth/telegram/verify", async (c) => {
   ]);
   c.header("Set-Cookie", sessionCookie(token, SESSION_DAYS * 86400));
   c.header("Set-Cookie", pendingCookie("", 0), { append: true });
+  return c.json({ ok: true });
+});
+
+// Telegram Login Widget sign-in (PRD §5.2(a)): the widget's signed payload → the linked Way account.
+app.post("/api/auth/telegram/widget", async (c) => {
+  const botToken = c.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) return c.json({ error: "Telegram sign-in is not configured." }, 503);
+  const data = await c.req.json<unknown>().catch(() => null);
+  const telegramUserId = await verifyWidgetLogin(botToken, data, Math.floor(Date.now() / 1000));
+  if (!telegramUserId) return c.json({ error: "Telegram sign-in could not be verified or has expired. Please try again." }, 401);
+
+  const account = await c.env.DB.prepare("SELECT user_id FROM telegram_accounts WHERE telegram_user_id = ?")
+    .bind(telegramUserId)
+    .first<{ user_id: number }>();
+  if (!account) return c.json({ error: "No Way account is linked to this Telegram." }, 404);
+
+  const token = newSessionToken();
+  const expires = new Date(Date.now() + SESSION_DAYS * 86400_000).toISOString();
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)").bind(token, account.user_id, expires),
+    // A Telegram sign-in has now succeeded, which is what lets the user switch password sign-in off.
+    c.env.DB.prepare("UPDATE telegram_accounts SET verified_login = 1 WHERE user_id = ?").bind(account.user_id),
+  ]);
+  c.header("Set-Cookie", sessionCookie(token, SESSION_DAYS * 86400));
   return c.json({ ok: true });
 });
 

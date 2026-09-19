@@ -1,5 +1,35 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api.ts";
+
+declare global {
+  interface Window { onTelegramAuth?: (user: Record<string, unknown>) => void }
+}
+
+/** Telegram's Login Widget (PRD §5.2(a)). The signed user object it hands back is posted to the server as-is. */
+function TelegramLogin({ bot, onAuth }: { bot: string; onAuth: (user: Record<string, unknown>) => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onAuthRef = useRef(onAuth);
+  onAuthRef.current = onAuth;
+
+  useEffect(() => {
+    window.onTelegramAuth = (user) => onAuthRef.current(user);
+    const script = document.createElement("script");
+    script.async = true;
+    script.src = "https://telegram.org/js/telegram-widget.js?22";
+    script.setAttribute("data-telegram-login", bot);
+    script.setAttribute("data-size", "large");
+    script.setAttribute("data-radius", "4");
+    script.setAttribute("data-onauth", "onTelegramAuth(user)");
+    const el = ref.current;
+    el?.appendChild(script);
+    return () => {
+      if (el) el.innerHTML = "";
+      delete window.onTelegramAuth;
+    };
+  }, [bot]);
+
+  return <div ref={ref} className="auth-telegram-widget" />;
+}
 
 export default function AuthPage({ mode, nav, onAuthed }: {
   mode: "login" | "register";
@@ -16,6 +46,26 @@ export default function AuthPage({ mode, nav, onAuthed }: {
   const [codeSent, setCodeSent] = useState(false);
   const [code, setCode] = useState("");
   const telegram = mode === "login" && viaTelegram;
+  // Username of the bot behind the Login Widget; null = not configured, so no widget.
+  const [widgetBot, setWidgetBot] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (mode !== "login") return;
+    api.get<{ bot: string | null }>("/api/auth/telegram/widget").then((r) => setWidgetBot(r.bot)).catch(() => {});
+  }, [mode]);
+
+  const widgetLogin = async (user: Record<string, unknown>) => {
+    setBusy(true);
+    setError("");
+    try {
+      await api.post("/api/auth/telegram/widget", user);
+      await onAuthed();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const switchMethod = (toTelegram: boolean) => {
     setViaTelegram(toTelegram);
@@ -90,6 +140,12 @@ export default function AuthPage({ mode, nav, onAuthed }: {
           <button className="btn" disabled={busy} type="submit">
             {mode === "register" ? "Create account" : telegram && !codeSent ? "Send code to Telegram" : "Sign in"}
           </button>
+          {mode === "login" && widgetBot && (
+            <div className="auth-telegram">
+              <span className="auth-or">或 <i>or</i></span>
+              <TelegramLogin bot={widgetBot} onAuth={widgetLogin} />
+            </div>
+          )}
           {mode === "login" && (
             <p className="auth-switch">
               {telegram && codeSent && (
