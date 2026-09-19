@@ -13,6 +13,14 @@ export interface User {
   direction: string;
 }
 
+/** GET /api/security. */
+export interface SecuritySettings {
+  /** Telegram is linked and has been used to sign in at least once (telegram_accounts.verified_login = 1). */
+  telegram_verified: boolean;
+  /** users.password_login_disabled: POST /api/auth/login answers 403 for this account. */
+  password_login_disabled: boolean;
+}
+
 export interface Area {
   id: number;
   name: string;

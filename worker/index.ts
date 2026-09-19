@@ -8,7 +8,7 @@ import { updateDay } from "./days.ts";
 import { upsertReview, type ReviewInput } from "./reviews.ts";
 import { runSchedules } from "./telegram/schedule.ts";
 import { BadInput, coerceFields, dateOrNull, idOrNull, int, nonEmptyText, oneOf, text, type FieldSpecs } from "./validate.ts";
-import type { GoalLevel, GoalStatus, GoalType, GuideProposal, Priority, ReviewPeriod } from "../shared/types.ts";
+import type { GoalLevel, GoalStatus, GoalType, GuideProposal, Priority, ReviewPeriod, SecuritySettings } from "../shared/types.ts";
 
 export interface Env {
   DB: D1Database;
@@ -128,9 +128,14 @@ app.post("/api/auth/register", async (c) => {
 
 app.post("/api/auth/login", async (c) => {
   const { email, password } = await c.req.json<{ email: string; password: string }>();
-  const user = await c.env.DB.prepare("SELECT id, password_hash FROM users WHERE email = ?")
+  // SELECT * so login keeps working before the column exists (migration pending, see /api/security).
+  const user = await c.env.DB.prepare("SELECT * FROM users WHERE email = ?")
     .bind((email ?? "").toLowerCase())
-    .first<{ id: number; password_hash: string }>();
+    .first<{ id: number; password_hash: string; password_login_disabled?: number }>();
+  // Checked before the password, so the answer says nothing about whether the password was right.
+  if (user?.password_login_disabled) {
+    return c.json({ error: "Password sign-in is disabled for this account. Use Telegram." }, 403);
+  }
   if (!user || !(await verifyPassword(password ?? "", user.password_hash))) {
     return c.json({ error: "Email or password is incorrect." }, 401);
   }
@@ -176,6 +181,46 @@ app.put("/api/me", async (c) => {
     await c.env.DB.prepare("UPDATE users SET name = ? WHERE id = ?").bind(name.trim(), c.get("userId")).run();
   if (direction !== undefined)
     await c.env.DB.prepare("UPDATE users SET direction = ? WHERE id = ?").bind(direction.trim(), c.get("userId")).run();
+  return c.json({ ok: true });
+});
+
+// Security (PRD §5.3, §11.1): Telegram as the only way in. No recovery mechanism, by decision.
+// The password hash is kept; any signed-in session can switch password sign-in back on.
+// Operator escape hatch: UPDATE users SET password_login_disabled = 0 WHERE email = ?
+// Schema assumed from #2/#9: users.password_login_disabled (INTEGER, default 0),
+// telegram_accounts(user_id, verified_login) — verified_login = 1 once a Telegram sign-in has succeeded.
+
+app.get("/api/security", async (c) => {
+  const row = await c.env.DB.prepare(
+    `SELECT u.password_login_disabled, t.verified_login
+       FROM users u LEFT JOIN telegram_accounts t ON t.user_id = u.id
+      WHERE u.id = ?`
+  ).bind(c.get("userId")).first<{ password_login_disabled: number; verified_login: number | null }>();
+  const security: SecuritySettings = {
+    telegram_verified: row?.verified_login === 1,
+    password_login_disabled: row?.password_login_disabled === 1,
+  };
+  return c.json({ security });
+});
+
+app.put("/api/security", async (c) => {
+  const userId = c.get("userId");
+  const { password_login_disabled } = await c.req.json<{ password_login_disabled?: unknown }>();
+  if (typeof password_login_disabled !== "boolean") {
+    return c.json({ error: "password_login_disabled must be true or false." }, 400);
+  }
+  if (!password_login_disabled) {
+    await c.env.DB.prepare("UPDATE users SET password_login_disabled = 0 WHERE id = ?").bind(userId).run();
+    return c.json({ ok: true });
+  }
+  // Only once Telegram sign-in is proven (a real Telegram sign-in happened), not merely claimed.
+  const res = await c.env.DB.prepare(
+    `UPDATE users SET password_login_disabled = 1
+      WHERE id = ? AND EXISTS (SELECT 1 FROM telegram_accounts WHERE user_id = ? AND verified_login = 1)`
+  ).bind(userId, userId).run();
+  if (!res.meta.changes) {
+    return c.json({ error: "Sign in with Telegram at least once before disabling password sign-in." }, 409);
+  }
   return c.json({ ok: true });
 });
 
