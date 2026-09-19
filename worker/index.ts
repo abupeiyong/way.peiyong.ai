@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
-import { hashPassword, verifyPassword, newSessionToken, sessionCookie, SESSION_COOKIE, SESSION_DAYS } from "./auth.ts";
+import { hashPassword, verifyPassword, newSessionToken, sessionCookie, underLimit, SESSION_COOKIE, SESSION_DAYS } from "./auth.ts";
 import { guideChat } from "./guide.ts";
 import { carryOver, deleteTask, materializeRepeats, updateTask } from "./tasks.ts";
 import { updateDay } from "./days.ts";
@@ -18,6 +18,10 @@ export interface Env {
   OPENAI_BASE_URL?: string;
   OPENAI_CHAT_MODEL?: string;
   TELEGRAM_BOT_TOKEN?: string;
+  /** 5 attempts per IP per minute across /api/auth/* (wrangler `ratelimits`). */
+  AUTH_LIMITER?: RateLimit;
+  /** 10 bot messages per user per minute (wrangler `ratelimits`); see floodGuard in telegram/router.ts. */
+  TG_FLOOD_LIMITER?: RateLimit;
 }
 
 type Vars = { userId: number };
@@ -85,6 +89,16 @@ function periodRange(view: string, anchor: string): { start: string; end: string
 }
 
 // ---------- auth ----------
+
+// Brute-force guard: checked before any handler, so a rejected attempt never touches D1.
+app.use("/api/auth/*", async (c, next) => {
+  const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
+  if (!(await underLimit(c.env.AUTH_LIMITER, `auth:${ip}`))) {
+    c.header("Retry-After", "60");
+    return c.json({ error: "Too many attempts. Please wait a minute and try again." }, 429);
+  }
+  return next();
+});
 
 app.post("/api/auth/register", async (c) => {
   const { email, password, name } = await c.req.json<{ email: string; password: string; name?: string }>();

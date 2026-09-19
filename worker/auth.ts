@@ -32,7 +32,26 @@ export async function verifyPassword(password: string, stored: string): Promise<
   const [saltHex, hash] = stored.split(":");
   if (!saltHex || !hash) return false;
   const candidate = await pbkdf2(password, fromHex(saltHex));
-  return candidate === hash;
+  return timingSafeEqual(candidate, hash);
+}
+
+/**
+ * Constant-time string compare: the time depends only on the lengths, never on where the strings differ.
+ * Use it for every secret check — password hashes, the Telegram webhook secret, widget HMACs.
+ */
+export function timingSafeEqual(a: string, b: string): boolean {
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i % (b.length || 1));
+  return diff === 0;
+}
+
+/**
+ * One attempt against a Workers rate-limit binding (PRD §11.2). No binding configured = no limit.
+ * The binding keeps its counters outside D1, so a rejected attempt never reaches the database.
+ */
+export async function underLimit(limiter: RateLimit | undefined, key: string): Promise<boolean> {
+  if (!limiter) return true;
+  return (await limiter.limit({ key })).success;
 }
 
 export function newSessionToken(): string {
