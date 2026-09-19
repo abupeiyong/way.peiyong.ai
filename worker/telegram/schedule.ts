@@ -20,9 +20,9 @@
 // Scaling: one query per tick is fine into the low hundreds of linked users; past that, precompute
 // next_send_at (UTC) per user per kind and index it.
 
+import { sendReply, TelegramApiError, TelegramBot } from "./api.ts";
 import { sendMorning } from "./compose.ts";
 import { startReview } from "./review.ts";
-import type { Reply } from "./router.ts";
 import { d1StateStore } from "./state.ts";
 import type { TopThreeContext } from "./topthree.ts";
 
@@ -133,34 +133,10 @@ export function dueKinds(prefs: Candidate, now: LocalNow): ScheduleKind[] {
   });
 }
 
-// ---------- Bot API ----------
-
-export class TelegramApiError extends Error {
-  readonly status: number;
-  readonly description: string;
-  /** parameters.retry_after on a 429, in seconds. */
-  readonly retryAfter?: number;
-  constructor(status: number, description: string, retryAfter?: number) {
-    super(`Telegram ${status}: ${description}`);
-    this.status = status;
-    this.description = description;
-    this.retryAfter = retryAfter;
-  }
-}
+// ---------- backoff ----------
 
 /** A 429 asked for a longer wait than MAX_BACKOFF_MS; the send is left for the next tick. */
 class Deferred extends Error {}
-
-export async function sendMessage(token: string, chatId: number | string, reply: Reply): Promise<void> {
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text: reply.text, ...(reply.reply_markup && { reply_markup: reply.reply_markup }) }),
-  });
-  if (res.ok) return;
-  const body = await res.json().catch(() => ({})) as { description?: string; parameters?: { retry_after?: number } };
-  throw new TelegramApiError(res.status, body.description ?? res.statusText, body.parameters?.retry_after);
-}
 
 /** Shared by every send in one run: after a 429, nobody sends before `until`. */
 interface Backoff { until: number }
@@ -186,7 +162,7 @@ async function release(db: D1Database, userId: number, kind: string, date: strin
 }
 
 /** Every due kind for one user, in order. Stops at the first 403 (chat gone) or deferral. */
-async function runUser(db: D1Database, token: string, u: Candidate, at: Date, backoff: Backoff): Promise<void> {
+async function runUser(db: D1Database, bot: TelegramBot, u: Candidate, at: Date, backoff: Backoff): Promise<void> {
   let now: LocalNow;
   try {
     now = localNow(u.timezone || "UTC", at);
@@ -201,7 +177,7 @@ async function runUser(db: D1Database, token: string, u: Candidate, at: Date, ba
     state: d1StateStore(db, u.user_id),
     async send(reply) {
       await waitOut(backoff);
-      await sendMessage(token, u.chat_id, reply);
+      await sendReply(bot, u.chat_id, reply);
     },
   };
   for (const k of dueKinds(u, now)) {
@@ -211,13 +187,13 @@ async function runUser(db: D1Database, token: string, u: Candidate, at: Date, ba
     } catch (e) {
       await release(db, u.user_id, k.kind, now.date);
       if (e instanceof Deferred) return;
-      if (e instanceof TelegramApiError && e.status === 403) {
+      if (e instanceof TelegramApiError && e.kind === "blocked") {
         await db.prepare("UPDATE telegram_accounts SET paused_until = ? WHERE user_id = ?")
           .bind(DISCONNECTED_UNTIL, u.user_id).run();
         console.warn(`schedule: user ${u.user_id} disconnected — ${e.description}`);
         return;
       }
-      if (e instanceof TelegramApiError && e.status === 429) {
+      if (e instanceof TelegramApiError && e.kind === "rate_limited") {
         backoff.until = Math.max(backoff.until, Date.now() + (e.retryAfter ?? 1) * 1000);
         return;
       }
@@ -240,8 +216,8 @@ async function housekeeping(db: D1Database): Promise<void> {
 export async function runSchedules(env: ScheduleEnv, scheduledTime: number): Promise<void> {
   const db = env.DB;
   try {
-    const token = env.TELEGRAM_BOT_TOKEN;
-    if (!token) return;
+    if (!env.TELEGRAM_BOT_TOKEN) return;
+    const bot = TelegramBot.fromEnv(env);
     const { results: candidates } = await db.prepare(
       `SELECT u.id AS user_id, u.timezone, u.name, u.direction, a.chat_id, a.paused_until, p.*
        FROM telegram_accounts a
@@ -256,7 +232,7 @@ export async function runSchedules(env: ScheduleEnv, scheduledTime: number): Pro
       while (next < candidates.length) {
         const u = candidates[next++];
         try {
-          await runUser(db, token, u, at, backoff);
+          await runUser(db, bot, u, at, backoff);
         } catch (e) {
           console.error(`schedule: user ${u.user_id} failed`, e);
         }

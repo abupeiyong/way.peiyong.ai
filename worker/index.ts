@@ -13,9 +13,8 @@ import { issueOtp, redeemOtp, OTP_TTL_SECONDS } from "./telegram/otp.ts";
 import { sendMorning } from "./telegram/compose.ts";
 import { updateTelegramPrefs } from "./telegram/prefs.ts";
 import { isLinkNonce, linkStatus, linkUrl, startLink, LINK_TTL_SECONDS } from "./telegram/link.ts";
-import {
-  runSchedules, isDisconnected, localDate, sendMessage, TelegramApiError, DISCONNECTED_UNTIL,
-} from "./telegram/schedule.ts";
+import { runSchedules, isDisconnected, localDate, DISCONNECTED_UNTIL } from "./telegram/schedule.ts";
+import { BOT_COMMANDS, sendReply, TelegramApiError, TelegramBot } from "./telegram/api.ts";
 import { d1StateStore } from "./telegram/state.ts";
 import { verifyWidgetLogin } from "./telegram/widget.ts";
 import { claimUpdate, handleUpdate, isUpdate, secretTokenOk, SECRET_HEADER } from "./telegram/webhook.ts";
@@ -236,7 +235,7 @@ app.post("/api/auth/telegram/widget", async (c) => {
 });
 
 // Reachable without a session cookie. The webhook authenticates with its secret token instead (PRD §4.4).
-const PUBLIC = ["/api/auth/", "/api/telegram/webhook"];
+const PUBLIC = ["/api/auth/", "/api/telegram/webhook", "/api/telegram/setup"];
 
 app.use("/api/*", async (c, next) => {
   if (PUBLIC.some((p) => c.req.path.startsWith(p))) return next();
@@ -398,14 +397,15 @@ app.post("/api/telegram/test", async (c) => {
   } catch {
     today = localDate("UTC", new Date());
   }
+  const bot = new TelegramBot(token);
   try {
     await sendMorning({
       db, userId, today,
       state: d1StateStore(db, userId),
-      send: (reply) => sendMessage(token, account.chat_id, reply),
+      send: (reply) => sendReply(bot, account.chat_id, reply),
     });
   } catch (e) {
-    if (e instanceof TelegramApiError && e.status === 403) {
+    if (e instanceof TelegramApiError && e.kind === "blocked") {
       await db.prepare("UPDATE telegram_accounts SET paused_until = ? WHERE user_id = ?").bind(DISCONNECTED_UNTIL, userId).run();
       return c.json({ error: "Telegram refused the message — the bot was blocked. Unblock it in Telegram and try again." }, 409);
     }
@@ -437,6 +437,16 @@ app.post("/api/telegram/webhook", async (c) => {
     console.error("telegram webhook: failed", e);
   }
   return c.body(null, 200);
+});
+
+// Deploy-time bot setup: installs the / command menu (BOT_COMMANDS in telegram/api.ts). Idempotent.
+// `npm run telegram:setup` after a deploy, with TELEGRAM_WEBHOOK_SECRET in the shell (Authorization: Bearer <it>).
+app.post("/api/telegram/setup", async (c) => {
+  const auth = c.req.header("Authorization")?.replace(/^Bearer\s+/i, "");
+  if (!secretTokenOk(c.env.TELEGRAM_WEBHOOK_SECRET, auth)) return c.json({ error: "unauthorized" }, 401);
+  const r = await TelegramBot.fromEnv(c.env).setMyCommands({ commands: BOT_COMMANDS });
+  if (!r.ok) return c.json({ error: `Telegram: ${r.description}` }, 502);
+  return c.json({ ok: true, commands: BOT_COMMANDS.map((b) => b.command) });
 });
 
 // ---------- day / tasks ----------
