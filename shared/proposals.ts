@@ -20,6 +20,19 @@ export function proposalLabel(p: GuideProposal): LabelPart[] {
   if (p.kind === "update_goal_progress") {
     return ["Progress of ", { strong: p.goal_title }, " → ", { strong: `${p.progress}%` }];
   }
+  if (p.kind === "set_body_plan") {
+    return [
+      "Body plan for ", { strong: p.goal_title }, ": ",
+      { strong: `${p.start_kg} → ${p.target_kg} kg` },
+      ` · ${p.weekly_workouts ?? 3} workouts a week${p.daily_kcal ? ` · ${p.daily_kcal} kcal/day` : ""}`,
+    ];
+  }
+  if (p.kind === "log_weight") {
+    return [`Weigh-in on ${p.date}: `, { strong: `${p.kg} kg` }];
+  }
+  if (p.kind === "log_workout") {
+    return [`Workout on ${p.date}: `, { strong: `${p.activity} · ${p.minutes} min` }, p.intensity ? ` · ${p.intensity}` : ""];
+  }
   if (p.kind === "create_review") {
     const answered = Object.values(p.answers ?? {}).filter(Boolean).length;
     return [`${p.period} review from ${p.period_start}: `, { strong: `${answered} answer${answered === 1 ? "" : "s"}` }];

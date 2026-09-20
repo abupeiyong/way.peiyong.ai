@@ -1,8 +1,10 @@
 // Applying an approved Guide proposal — shared by POST /api/guide/apply and the Telegram [✓ Approve] button,
 // so a tap and a click write the same rows. Nothing here runs without the user's approval.
 
-import type { GoalLevel, GuideProposal, ReviewPeriod } from "../shared/types.ts";
+import type { GoalLevel, GuideProposal, ReviewPeriod, WorkoutIntensity } from "../shared/types.ts";
+import { refreshBodyGoalProgress } from "./body.ts";
 import { reviewPeriodStart, weekStartOf } from "./dates.ts";
+import { userToday } from "./telegram/time.ts";
 
 const GOAL_LEVELS: GoalLevel[] = ["lifetime", "year", "quarter", "month", "week"];
 const REVIEW_PERIODS: ReviewPeriod[] = ["daily", "weekly", "monthly", "quarterly", "yearly"];
@@ -13,6 +15,30 @@ export type ApplyResult =
   | { ok: false; status: 400 | 404; error: string };
 
 const isDate = (s: unknown): s is string => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+
+const INTENSITIES: WorkoutIntensity[] = ["easy", "moderate", "hard"];
+/** The weight a body can plausibly have, in kg (PRD-body §5.1); anything else is a typo, not a weigh-in. */
+const KG_RANGE: [number, number] = [30, 300];
+
+/** The Telegram slots the body prompts use, filled from the defaults when a plan is created (PRD-body §4.3, §6). */
+const BODY_PREF_DEFAULTS: [string, string][] = [
+  ["weigh_at", "07:00"], ["breakfast_at", "08:30"], ["lunch_at", "13:00"], ["dinner_at", "19:30"], ["workout_at", "20:30"],
+];
+
+/** Today in the user's timezone — the date a body summary is computed for (users.timezone; NULL = UTC). */
+async function todayOf(db: D1Database, userId: number): Promise<string> {
+  // SELECT * for the same reason as guideContext: it works whatever columns users has.
+  const u = await db.prepare("SELECT * FROM users WHERE id = ?").bind(userId).first<{ timezone?: string | null }>();
+  return userToday(u?.timezone);
+}
+
+/** A goal of this user by title: exact first, then case-insensitively. */
+async function findGoalByTitle(db: D1Database, userId: number, title: unknown): Promise<{ id: number } | null> {
+  if (typeof title !== "string" || !title.trim()) return null;
+  return (await db.prepare("SELECT id FROM goals WHERE user_id = ? AND title = ?").bind(userId, title).first<{ id: number }>())
+    ?? (await db.prepare("SELECT id FROM goals WHERE user_id = ? AND lower(title) = lower(?) ORDER BY id LIMIT 1")
+      .bind(userId, title.trim()).first<{ id: number }>());
+}
 
 export async function applyProposal(db: D1Database, userId: number, proposal: GuideProposal): Promise<ApplyResult> {
   if (!proposal || typeof proposal !== "object") return { ok: false, status: 400, error: "proposal must be an object" };
@@ -115,6 +141,79 @@ export async function applyProposal(db: D1Database, userId: number, proposal: Gu
     ).bind(userId, proposal.period, periodStart,
            JSON.stringify(Object.fromEntries(Object.entries(answers).map(([q, a]) => [q, String(a ?? "")])))).run();
     return { ok: true, applied: "review" };
+  }
+
+  // ---------- body (PRD-body §9); meals are never proposed ----------
+
+  if (proposal.kind === "set_body_plan") {
+    const goal = await findGoalByTitle(db, userId, proposal.goal_title);
+    if (!goal) return { ok: false, status: 404, error: `no goal titled "${proposal.goal_title}"` };
+    const start = Number(proposal.start_kg);
+    const target = Number(proposal.target_kg);
+    for (const [name, v] of [["start_kg", start], ["target_kg", target]] as const) {
+      if (!Number.isFinite(v) || v < KG_RANGE[0] || v > KG_RANGE[1]) {
+        return { ok: false, status: 400, error: `${name} must be a weight in kg from ${KG_RANGE[0]} to ${KG_RANGE[1]}` };
+      }
+    }
+    if (start === target) return { ok: false, status: 400, error: "start_kg and target_kg must differ" };
+    const workouts = proposal.weekly_workouts === undefined ? 3 : Math.round(Number(proposal.weekly_workouts));
+    if (!Number.isFinite(workouts) || workouts < 0 || workouts > 14) {
+      return { ok: false, status: 400, error: "weekly_workouts must be from 0 to 14" };
+    }
+    let kcal: number | null = null;
+    if (proposal.daily_kcal !== undefined && proposal.daily_kcal !== null) {
+      kcal = Math.round(Number(proposal.daily_kcal));
+      if (!Number.isFinite(kcal) || kcal < 800 || kcal > 6000) {
+        return { ok: false, status: 400, error: "daily_kcal must be from 800 to 6000, or omitted" };
+      }
+    }
+    // One plan per user: attaching it to another goal replaces the old one, as the Goals page does.
+    await db.prepare(
+      `INSERT INTO body_plans (user_id, goal_id, start_kg, target_kg, weekly_workouts, daily_kcal) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (user_id) DO UPDATE SET
+         goal_id = excluded.goal_id, start_kg = excluded.start_kg, target_kg = excluded.target_kg,
+         weekly_workouts = excluded.weekly_workouts, daily_kcal = excluded.daily_kcal, updated_at = datetime('now')`
+    ).bind(userId, goal.id, start, target, workouts, kcal).run();
+    await db.prepare("INSERT OR IGNORE INTO telegram_prefs (user_id) VALUES (?)").bind(userId).run();
+    for (const [field, value] of BODY_PREF_DEFAULTS) {
+      await db.prepare(`UPDATE telegram_prefs SET ${field} = COALESCE(${field}, ?) WHERE user_id = ?`).bind(value, userId).run();
+    }
+    await refreshBodyGoalProgress(db, userId, await todayOf(db, userId));
+    return { ok: true, applied: "body_plan" };
+  }
+
+  if (proposal.kind === "log_weight") {
+    if (!isDate(proposal.date)) return { ok: false, status: 400, error: "bad date" };
+    const value = Number(proposal.kg);
+    if (!Number.isFinite(value) || value < KG_RANGE[0] || value > KG_RANGE[1]) {
+      return { ok: false, status: 400, error: `kg must be a weight from ${KG_RANGE[0]} to ${KG_RANGE[1]}` };
+    }
+    const kg = Math.round(value * 10) / 10;
+    // One reading per local date (PRD-body §3): the latest wins.
+    await db.prepare(
+      `INSERT INTO weight_logs (user_id, date, kg, source, note) VALUES (?, ?, ?, 'guide', ?)
+       ON CONFLICT (user_id, date) DO UPDATE SET kg = excluded.kg, source = excluded.source, note = excluded.note`
+    ).bind(userId, proposal.date, kg, String(proposal.note ?? "")).run();
+    // goals.progress is derived for a goal with a body plan (PRD-body §4.3).
+    await refreshBodyGoalProgress(db, userId, await todayOf(db, userId));
+    return { ok: true, applied: "weight" };
+  }
+
+  if (proposal.kind === "log_workout") {
+    if (!isDate(proposal.date)) return { ok: false, status: 400, error: "bad date" };
+    const activity = typeof proposal.activity === "string" ? proposal.activity.trim().toLowerCase() : "";
+    if (!activity) return { ok: false, status: 400, error: "activity required" };
+    const minutes = Math.round(Number(proposal.minutes));
+    if (!Number.isFinite(minutes) || minutes < 1 || minutes > 600) {
+      return { ok: false, status: 400, error: "minutes must be from 1 to 600" };
+    }
+    if (proposal.intensity !== undefined && !INTENSITIES.includes(proposal.intensity)) {
+      return { ok: false, status: 400, error: `unknown intensity "${proposal.intensity}"` };
+    }
+    await db.prepare(
+      "INSERT INTO workout_logs (user_id, date, activity, minutes, intensity, note) VALUES (?, ?, ?, ?, ?, ?)"
+    ).bind(userId, proposal.date, activity.slice(0, 60), minutes, proposal.intensity ?? null, String(proposal.note ?? "")).run();
+    return { ok: true, applied: "workout" };
   }
 
   return { ok: false, status: 400, error: "unknown proposal kind" };
