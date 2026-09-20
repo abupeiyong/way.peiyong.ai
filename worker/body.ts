@@ -6,7 +6,7 @@
 // Every statement is scoped by user_id. The tables arrive with migration 0004, so every read is wrapped
 // in a try/catch: on a database where 0004 has not run yet, a body-less account is the answer, not a 500.
 
-import type { BodyPlan, BodySummary, BodyVerdict, WeightLog } from "../shared/types.ts";
+import type { BodyPlan, BodySummary, BodyVerdict, MealLog, WeightLog, WorkoutLog } from "../shared/types.ts";
 import { BODY_VERDICT_TEXT, WEIGHT_GOAL_RE } from "../shared/body.ts";
 import { addDays, weekStartOf } from "./dates.ts";
 
@@ -155,6 +155,35 @@ export async function loadWeightLogs(db: D1Database, userId: number, from?: stri
           .bind(userId, from).all<WeightLog>()
       : await db.prepare("SELECT date, kg, source, note FROM weight_logs WHERE user_id = ? ORDER BY date")
           .bind(userId).all<WeightLog>();
+    return results;
+  } catch {
+    return []; // migration 0004 has not run here
+  }
+}
+
+/**
+ * The meals from `from` (inclusive) on, oldest first. `ai_json` and `tg_file_id` stay behind:
+ * the raw model output and the Telegram reference are not part of the API contract (PRD-body §12).
+ */
+export async function loadMealLogs(db: D1Database, userId: number, from: string): Promise<MealLog[]> {
+  try {
+    const { results } = await db.prepare(
+      `SELECT id, date, time_min, kind, description, kcal, protein_g, user_edited, confidence
+         FROM meal_logs WHERE user_id = ? AND date >= ? ORDER BY date, time_min, id`
+    ).bind(userId, from).all<MealLog>();
+    return results;
+  } catch {
+    return []; // migration 0004 has not run here
+  }
+}
+
+/** The workouts from `from` (inclusive) on, oldest first — the same rows the week block counts. */
+export async function loadWorkoutLogs(db: D1Database, userId: number, from: string): Promise<WorkoutLog[]> {
+  try {
+    const { results } = await db.prepare(
+      `SELECT id, date, activity, minutes, intensity, note, task_id
+         FROM workout_logs WHERE user_id = ? AND date >= ? ORDER BY date, id`
+    ).bind(userId, from).all<WorkoutLog>();
     return results;
   } catch {
     return []; // migration 0004 has not run here
