@@ -23,6 +23,7 @@ import { bodyNudgeAction, type BodyNudgeRule } from "./bodynudge.ts";
 import { bodyAction } from "./commands.ts";
 import { MAX_WORKOUT_MIN, offerWorkoutFromTask, workoutFromTask, workoutPick, type WorkoutPick } from "./workout.ts";
 import { mealButton, mealPromptButton, type MealAction, type MealPromptAction } from "./meal.ts";
+import { adaptButton, type AdaptSlot } from "./adapt.ts";
 import { weightButton, type WeightAction } from "./weight.ts";
 import type { Reply } from "./router.ts";
 import type { TelegramStateStore } from "./state.ts";
@@ -60,8 +61,14 @@ const WEIGHT_CODES = { skip: "s", undo: "u" } as const satisfies Record<WeightAc
 /** The evening check's activity buttons (PRD-body §5.4); `t` is taken by wo:t:<taskId>:<min>. */
 const WORKOUT_CODES = { run: "r", strength: "s", walk: "w", other: "o", rest: "x" } as const satisfies Record<WorkoutPick, string>;
 
-/** The confirm card's buttons (PRD-body §5.2); `estimate` only appears on a meal with no numbers yet. */
-const MEAL_CODES = { confirm: "y", edit: "e", discard: "x", estimate: "g" } as const satisfies Record<MealAction, string>;
+/**
+ * The confirm card's buttons (PRD-body §5.2); `estimate` only appears on a meal with no numbers yet and
+ * `reanalyze` only on one that still has its photo (§13 item 12).
+ */
+const MEAL_CODES = { confirm: "y", edit: "e", discard: "x", estimate: "g", reanalyze: "r" } as const satisfies Record<MealAction, string>;
+
+/** The adaptive-time suggestion (PRD-body §13 item 10); `ad:x` leaves the slot alone. */
+const ADAPT_CODES = { weigh: "w", breakfast: "b", lunch: "l", dinner: "d", workout: "o" } as const satisfies Record<AdaptSlot, string>;
 
 /** The meal ask's own buttons (PRD-body §5.2); they carry the meal and the date, never a row id. */
 const MEAL_PROMPT_CODES = { skip: "s", none: "n" } as const satisfies Record<MealPromptAction, string>;
@@ -118,6 +125,8 @@ type WorkoutFromTask<Id extends Num, Min extends Num> = `wo:t:${Id}:${Min}`;
 type Meal<Id extends Num> = `ml:${Id}:${(typeof MEAL_CODES)[MealAction]}`;
 type MealPrompt<Date extends string> =
   `ml:${(typeof MEAL_PROMPT_CODES)[MealPromptAction]}:${(typeof MEAL_KIND_CODES)[MealKind]}:${Date}`;
+/** `ad:l:1340` — the slot and the new time as four digits, since ':' is the separator. */
+type Adapt<Time extends string> = `ad:${(typeof ADAPT_CODES)[AdaptSlot]}:${Time}` | "ad:x";
 
 export type Callback =
   | { verb: "task_done"; taskId: number }
@@ -158,7 +167,9 @@ export type Callback =
   | { verb: "workout_pick"; pick: WorkoutPick }
   | { verb: "workout_task"; taskId: number; min: number }
   | { verb: "meal"; mealId: number; action: MealAction }
-  | { verb: "meal_prompt"; action: MealPromptAction; meal: MealKind; date: string };
+  | { verb: "meal_prompt"; action: MealPromptAction; meal: MealKind; date: string }
+  /** slot and time are null on `ad:x` — the suggestion was turned down. */
+  | { verb: "adapt"; slot: AdaptSlot | null; time: string | null };
 
 // Numeric bounds; the build-time assertion below is checked against their widest values.
 const MAX_OFFSET_DAYS = 365;
@@ -175,7 +186,8 @@ type Widest =
   | TopDone<"3", "2026-12-31"> | GoalProgress<MaxId, "100"> | GoalAct<MaxId> | GoalList | Weekly<"2026-12-31">
   | Block<MaxId> | Checkin<MaxId, "10"> | Login<MaxId> | Register | TimezonePick<"30"> | Settings | Mute | Unlink
   | DirectionSkip | ProposalAnswer<MaxId, "99"> | Brief | BodyNudge | BodyActionData
-  | WeightData<"2026-12-31"> | WorkoutPickData | WorkoutFromTask<MaxId, "600"> | Meal<MaxId> | MealPrompt<"2026-12-31">;
+  | WeightData<"2026-12-31"> | WorkoutPickData | WorkoutFromTask<MaxId, "600"> | Meal<MaxId> | MealPrompt<"2026-12-31">
+  | Adapt<"2359">;
 type Budget<N extends number, T extends 0[] = []> = T["length"] extends N ? T : Budget<N, [...T, 0]>;
 type Fits<S extends string, B extends 0[]> = S extends `${infer _}${infer Rest}`
   ? B extends [0, ...infer Left extends 0[]] ? Fits<Rest, Left> : false
@@ -343,6 +355,14 @@ export function parseCallback(data: string): Callback | null {
       const mealId = toId(p[1]), action = codeOf<MealAction>(MEAL_CODES, p[2]);
       return p.length === 3 && mealId !== null && action ? { verb: "meal", mealId, action } : null;
     }
+    case "ad": {
+      if (p.length === 2 && p[1] === "x") return { verb: "adapt", slot: null, time: null };
+      const slot = codeOf<AdaptSlot>(ADAPT_CODES, p[1]);
+      const t = p[2] && /^\d{4}$/.test(p[2]) ? p[2] : null;
+      if (p.length !== 3 || !slot || t === null) return null;
+      const h = Number(t.slice(0, 2)), m = Number(t.slice(2));
+      return h < 24 && m < 60 ? { verb: "adapt", slot, time: `${t.slice(0, 2)}:${t.slice(2)}` } : null;
+    }
   }
   return null;
 }
@@ -402,6 +422,9 @@ export const cb = {
   meal: (mealId: number, action: MealAction): Meal<number> => checked(`ml:${mealId}:${MEAL_CODES[action]}` as const),
   mealPrompt: (action: MealPromptAction, meal: MealKind, date: string): MealPrompt<string> =>
     checked(`ml:${MEAL_PROMPT_CODES[action]}:${MEAL_KIND_CODES[meal]}:${date}` as const),
+  adapt: (slot: AdaptSlot, time: string): Adapt<string> =>
+    checked(`ad:${ADAPT_CODES[slot]}:${time.replace(":", "")}` as const),
+  adaptKeep: (): "ad:x" => checked("ad:x"),
 };
 
 // ---------- handlers ----------
@@ -496,6 +519,7 @@ async function dispatch(ctx: CallbackContext, p: Callback): Promise<string | und
     case "workout_task": return workoutFromTask(ctx, p.taskId, p.min);
     case "meal": return mealButton(ctx, p.mealId, p.action);
     case "meal_prompt": return mealPromptButton(ctx, p.action, p.meal, p.date);
+    case "adapt": return adaptButton(ctx, p.slot, p.time);
   }
 }
 

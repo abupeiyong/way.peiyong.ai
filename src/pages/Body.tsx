@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from "react";
 import { api, ApiError, addDays, todayStr } from "../api.ts";
-import type { BodySummary, WeightLog } from "../../shared/types.ts";
+import type { BodyMonthReport, BodySummary, WeightLog } from "../../shared/types.ts";
 import { BODY_VERDICT_TEXT, WEIGHT_UNIT_LABELS, isWeightUnit, type WeightUnit } from "../../shared/body.ts";
 import { useApp } from "../App.tsx";
 import { Icon } from "../components/Icon.tsx";
@@ -19,6 +19,8 @@ interface Payload {
   trend: (number | null)[];
   /** The active goal that looks like a weight goal, when no plan is attached yet. */
   suggested: string | null;
+  /** The month so far — the same report the bot sends on the 1st (PRD-body §13 item 11). */
+  month: BodyMonthReport | null;
 }
 
 interface Point { date: string; kg: number; trend: number | null }
@@ -103,6 +105,8 @@ export default function Body() {
 
       {summary && <PlanCard summary={summary} onEdit={() => nav("/goals")} />}
 
+      {summary && data.month && <MonthCard report={data.month} />}
+
       <div className="card" style={{ marginTop: 22 }}>
         <div className="card-label">
           体重曲线 <i>Weight</i>
@@ -154,6 +158,36 @@ export default function Body() {
         </div>
       </div>
     </>
+  );
+}
+
+const delta = (n: number) => `${n > 0 ? "+" : n < 0 ? "−" : ""}${Math.abs(n).toFixed(1)}`;
+
+/** 本月 · This month (PRD-body §13 item 11): the same numbers the monthly Telegram report prints. */
+function MonthCard({ report }: { report: BodyMonthReport }) {
+  const monthName = new Date(report.month + "-01T00:00:00").toLocaleDateString("en-US", { month: "long" });
+  return (
+    <div className="card" style={{ marginTop: 18 }}>
+      <div className="card-label">本月 <i>{monthName}</i></div>
+      <div className="body-stats">
+        <div>
+          <div className="num">{report.change_kg === null ? "—" : `${delta(report.change_kg)} kg`}</div>
+          <div className="lbl">7 日均变化 · Trend change</div>
+        </div>
+        <div><div className="num">{report.weigh_ins}</div><div className="lbl">称重 · Weigh-ins</div></div>
+        <div><div className="num">{report.workouts}</div><div className="lbl">运动 · Workouts · {report.minutes} 分钟</div></div>
+        <div>
+          <div className="num">{report.kcal_avg === null ? "—" : `~${report.kcal_avg}`}</div>
+          <div className="lbl">平均 kcal · Daily average</div>
+        </div>
+      </div>
+      <p className="hint">
+        {report.best_week
+          ? <>最好的一周 · best week {shortDate(report.best_week.week_start)} · {delta(report.best_week.change_kg)} kg · 运动 {report.best_week.workouts} 次</>
+          : <>称重多几次，就能看出最好的一周 · a few more weigh-ins and the best week shows up</>}
+        {report.meals_logged ? ` · 记录 ${report.meals_logged} 餐` : ""}
+      </p>
+    </div>
   );
 }
 

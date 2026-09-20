@@ -398,6 +398,11 @@ export default function Settings() {
                       <input className="input" type="time" value={tgDraft.workout_at ?? ""}
                              onChange={(e) => setTgDraft({ ...tgDraft, workout_at: e.target.value || null })} />
                     </div>
+                    <div>
+                      <label className="field-label">月初小结 Monthly body</label>
+                      <input className="input" type="time" value={tgDraft.body_month_at ?? ""}
+                             onChange={(e) => setTgDraft({ ...tgDraft, body_month_at: e.target.value || null })} />
+                    </div>
                   </div>
                   <label className="row small" style={{ cursor: "pointer" }}>
                     <button type="button" className={`checkbox${tgDraft.body_nudges ? " checked" : ""}`} aria-label="Toggle body nudges"

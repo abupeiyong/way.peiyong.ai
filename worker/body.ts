@@ -6,9 +6,9 @@
 // Every statement is scoped by user_id. The tables arrive with migration 0004, so every read is wrapped
 // in a try/catch: on a database where 0004 has not run yet, a body-less account is the answer, not a 500.
 
-import type { BodyPlan, BodySummary, BodyVerdict, MealLog, WeightLog, WorkoutLog } from "../shared/types.ts";
+import type { BodyMonthReport, BodyPlan, BodySummary, BodyVerdict, MealLog, WeightLog, WorkoutLog } from "../shared/types.ts";
 import { BODY_VERDICT_TEXT, WEIGHT_GOAL_RE } from "../shared/body.ts";
-import { addDays, weekStartOf } from "./dates.ts";
+import { addDays, monthStartOf, weekStartOf } from "./dates.ts";
 
 /** "能不能达成" and friends: the question that must be answered from the summary first (PRD-body §8.3). */
 const FEASIBILITY_RE = /能不能|能否|来得及|赶得上|达得到|达成|做得到|有没有希望|on track|make it|achievable|reach (it|the target)|going to (hit|reach)/i;
@@ -65,6 +65,8 @@ export async function latestWeight(db: D1Database, userId: number): Promise<Weig
 /** The Telegram slots the body prompts use, filled from the defaults when a plan is created (PRD-body §4.3, §6). */
 const BODY_PREF_DEFAULTS: [string, string][] = [
   ["weigh_at", "07:00"], ["breakfast_at", "08:30"], ["lunch_at", "13:00"], ["dinner_at", "19:30"], ["workout_at", "20:30"],
+  // The monthly report (PRD-body §13 item 11) rides on the 1st, after the morning message.
+  ["body_month_at", "09:00"],
 ];
 
 /**
@@ -292,6 +294,88 @@ export async function refreshBodyGoalProgress(db: D1Database, userId: number, to
   await db.prepare("UPDATE goals SET progress = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?")
     .bind(summary.progress, summary.plan.goal_id, userId).run();
   return summary.progress;
+}
+
+/** The last day of the month `date` falls in. */
+export function monthEndOf(date: string): string {
+  const d = new Date(date + "T00:00:00Z");
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
+}
+
+/**
+ * One calendar month of body logs (PRD-body §13 item 11). Deterministic like bodySummary: the trend at
+ * each end of the month, what was logged inside it, and the week whose trend moved furthest toward the
+ * target. `month` is any date in the month; the window stops at `today`, so the running month is honest.
+ * Null when there is no plan — there is nothing to be a month of.
+ */
+export async function bodyMonthReport(
+  db: D1Database, userId: number, month: string, today: string
+): Promise<BodyMonthReport | null> {
+  const plan = await loadBodyPlan(db, userId);
+  if (!plan) return null;
+  const from = monthStartOf(month);
+  const end = monthEndOf(month);
+  const to = end < today ? end : today;
+  if (to < from) return null;
+
+  let weights: WeightLog[] = [];
+  let workouts: { date: string; minutes: number }[] = [];
+  let meals: { date: string; description: string; kcal: number | null }[] = [];
+  try {
+    const [w, o, m] = await Promise.all([
+      // The trend at `from` needs the six days before it as well.
+      db.prepare("SELECT date, kg, source, note FROM weight_logs WHERE user_id = ? AND date BETWEEN ? AND ? ORDER BY date")
+        .bind(userId, addDays(from, -(TREND_WINDOW - 1)), to).all<WeightLog>(),
+      db.prepare("SELECT date, minutes FROM workout_logs WHERE user_id = ? AND date BETWEEN ? AND ?")
+        .bind(userId, from, to).all<{ date: string; minutes: number }>(),
+      db.prepare("SELECT date, description, kcal FROM meal_logs WHERE user_id = ? AND date BETWEEN ? AND ?")
+        .bind(userId, from, to).all<{ date: string; description: string; kcal: number | null }>(),
+    ]);
+    weights = w.results;
+    workouts = o.results;
+    meals = m.results;
+  } catch {
+    return null; // migration 0004 has not run here
+  }
+
+  const round1 = (n: number | null): number | null => (n === null ? null : Math.round(n * 10) / 10);
+  const startTrend = round1(trendOf(weights, from));
+  const endTrend = round1(trendOf(weights, to));
+  const gaining = plan.target_kg > plan.start_kg;
+
+  // The best week is the one whose trend moved furthest toward the target; a week without both ends is skipped.
+  let best: BodyMonthReport["best_week"] = null;
+  for (let week = weekStartOf(from); week <= to; week = addDays(week, 7)) {
+    const a = trendOf(weights, week < from ? from : week);
+    const b = trendOf(weights, addDays(week, 6) > to ? to : addDays(week, 6));
+    if (a === null || b === null) continue;
+    const change = Math.round((b - a) * 10) / 10;
+    const toward = gaining ? change : -change;
+    if (best && toward <= (gaining ? best.change_kg : -best.change_kg)) continue;
+    best = {
+      week_start: week,
+      change_kg: change,
+      workouts: workouts.filter((o) => o.date >= week && o.date <= addDays(week, 6)).length,
+    };
+  }
+
+  const kcalDays = [...new Set(meals.filter((m) => m.kcal !== null).map((m) => m.date))].length;
+  const kcalTotal = meals.reduce((s, m) => s + (m.kcal ?? 0), 0);
+
+  return {
+    month: from.slice(0, 7),
+    from,
+    to,
+    start_trend: startTrend,
+    end_trend: endTrend,
+    change_kg: startTrend === null || endTrend === null ? null : Math.round((endTrend - startTrend) * 10) / 10,
+    weigh_ins: weights.filter((w) => w.date >= from).length,
+    workouts: workouts.length,
+    minutes: workouts.reduce((s, o) => s + o.minutes, 0),
+    kcal_avg: kcalDays ? Math.round(kcalTotal / kcalDays) : null,
+    meals_logged: meals.filter((m) => m.description.trim()).length,
+    best_week: best,
+  };
 }
 
 // ---------- wording, shared by /body, the Guide and the web ----------
