@@ -64,6 +64,36 @@ function slope(points: { x: number; y: number }[]): number | null {
   return den === 0 ? null : num / den;
 }
 
+/** Mean of the readings in [date−6, date]; null with fewer than two of them (PRD-body §8.1). */
+function trendOf(weights: { date: string; kg: number }[], date: string): number | null {
+  const from = addDays(date, -(TREND_WINDOW - 1));
+  const inWindow = weights.filter((w) => w.date >= from && w.date <= date);
+  if (inWindow.length < MIN_TREND_READINGS) return null;
+  return inWindow.reduce((s, w) => s + w.kg, 0) / inWindow.length;
+}
+
+/**
+ * The 7-day trend on each of `dates`, rounded like bodySummary's, from one read of the weigh-ins.
+ * The nudge rules and the Sunday recap compare the trend a week and a month back (PRD-body §6.2, §8.2).
+ */
+export async function weightTrends(db: D1Database, userId: number, dates: string[]): Promise<(number | null)[]> {
+  if (!dates.length) return [];
+  const from = addDays(dates.reduce((a, b) => (a < b ? a : b)), -(TREND_WINDOW - 1));
+  const to = dates.reduce((a, b) => (a > b ? a : b));
+  let weights: WeightLog[] = [];
+  try {
+    const r = await db.prepare("SELECT date, kg, source, note FROM weight_logs WHERE user_id = ? AND date BETWEEN ? AND ? ORDER BY date")
+      .bind(userId, from, to).all<WeightLog>();
+    weights = r.results;
+  } catch {
+    return dates.map(() => null); // migration 0004 has not run here
+  }
+  return dates.map((d) => {
+    const t = trendOf(weights, d);
+    return t === null ? null : Math.round(t * 10) / 10;
+  });
+}
+
 /** The whole picture for the user's weight goal, or null when there is no plan. */
 export async function bodySummary(db: D1Database, userId: number, today: string): Promise<BodySummary | null> {
   const plan = await loadBodyPlan(db, userId);
@@ -89,13 +119,7 @@ export async function bodySummary(db: D1Database, userId: number, today: string)
     // 0004 not applied: the plan could not have been created either, but stay quiet rather than throw.
   }
 
-  /** Mean of the readings in [date−6, date]; null with fewer than two of them. */
-  const trendAt = (date: string): number | null => {
-    const from = addDays(date, -(TREND_WINDOW - 1));
-    const inWindow = weights.filter((w) => w.date >= from && w.date <= date);
-    if (inWindow.length < MIN_TREND_READINGS) return null;
-    return inWindow.reduce((s, w) => s + w.kg, 0) / inWindow.length;
-  };
+  const trendAt = (date: string): number | null => trendOf(weights, date);
 
   const trend = trendAt(today);
   const trendPrev = trendAt(addDays(today, -TREND_WINDOW));

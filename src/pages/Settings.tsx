@@ -369,6 +369,45 @@ export default function Settings() {
                 </button>
                 中午提醒 · Midday nudge when the top three is still empty (11:00)
               </label>
+              {telegram.body_plan && (
+                <>
+                  <div className="field-label">身体 · Body（PRD-body §6）</div>
+                  <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-end" }}>
+                    <div>
+                      <label className="field-label">称重 Weigh-in</label>
+                      <input className="input" type="time" value={tgDraft.weigh_at ?? ""}
+                             onChange={(e) => setTgDraft({ ...tgDraft, weigh_at: e.target.value || null })} />
+                    </div>
+                    <div>
+                      <label className="field-label">早饭 Breakfast</label>
+                      <input className="input" type="time" value={tgDraft.breakfast_at ?? ""}
+                             onChange={(e) => setTgDraft({ ...tgDraft, breakfast_at: e.target.value || null })} />
+                    </div>
+                    <div>
+                      <label className="field-label">午饭 Lunch</label>
+                      <input className="input" type="time" value={tgDraft.lunch_at ?? ""}
+                             onChange={(e) => setTgDraft({ ...tgDraft, lunch_at: e.target.value || null })} />
+                    </div>
+                    <div>
+                      <label className="field-label">晚饭 Dinner</label>
+                      <input className="input" type="time" value={tgDraft.dinner_at ?? ""}
+                             onChange={(e) => setTgDraft({ ...tgDraft, dinner_at: e.target.value || null })} />
+                    </div>
+                    <div>
+                      <label className="field-label">运动 Workout</label>
+                      <input className="input" type="time" value={tgDraft.workout_at ?? ""}
+                             onChange={(e) => setTgDraft({ ...tgDraft, workout_at: e.target.value || null })} />
+                    </div>
+                  </div>
+                  <label className="row small" style={{ cursor: "pointer" }}>
+                    <button type="button" className={`checkbox${tgDraft.body_nudges ? " checked" : ""}`} aria-label="Toggle body nudges"
+                            onClick={() => setTgDraft({ ...tgDraft, body_nudges: tgDraft.body_nudges ? 0 : 1 })}>
+                      {tgDraft.body_nudges ? <Icon name="check" /> : null}
+                    </button>
+                    身体提醒 · One nudge at 12:00, only when something is missing
+                  </label>
+                </>
+              )}
               <label className="row small" style={{ cursor: "pointer" }}>
                 <button type="button" className={`checkbox${tgDraft.block_reminders ? " checked" : ""}`} aria-label="Toggle block reminders"
                         onClick={() => setTgDraft({ ...tgDraft, block_reminders: tgDraft.block_reminders ? 0 : 1 })}>
@@ -493,6 +532,8 @@ export default function Settings() {
 const KIND_LABELS: Record<string, string> = {
   morning: "晨报 Morning", review_prompt: "晚间复盘 Evening review", weekly_plan: "周一计划 Monday plan",
   weekly_review: "周日复盘 Sunday review", midday_nudge: "中午提醒 Nudge", area_checkin: "领域打分 Check-in", block: "时间块 Blocks",
+  weigh_in: "称重 Weigh-in", meal_breakfast: "早饭 Breakfast", meal_lunch: "午饭 Lunch", meal_dinner: "晚饭 Dinner",
+  workout_check: "运动 Workout", body_nudge: "身体提醒 Body nudge", body_recap: "本周身体 Body recap",
 };
 
 /** The scheduled message quiet hours would swallow, or "" — the scheduler skips every kind inside them. */

@@ -19,6 +19,9 @@ export const TELEGRAM_PREF_FIELDS: FieldSpecs = {
   morning_at: hhmmOrNull, review_at: hhmmOrNull, weekly_plan_at: hhmmOrNull, weekly_review_at: hhmmOrNull,
   checkin_at: hhmmOrNull, quiet_from: hhmmOrNull, quiet_to: hhmmOrNull,
   nudges: flag, block_reminders: flag, streaks: flag,
+  // The body slots (PRD-body §6); they are filled from the defaults when a body plan is created.
+  weigh_at: hhmmOrNull, breakfast_at: hhmmOrNull, lunch_at: hhmmOrNull, dinner_at: hhmmOrNull, workout_at: hhmmOrNull,
+  body_nudges: flag,
 };
 
 /** The defaults a fresh link starts from (PRD §6). NULL columns mean off, so the row is seeded explicitly. */
