@@ -8,6 +8,7 @@
 
 import { updateTask } from "../tasks.ts";
 import { cb, shiftDate, type CallbackContext } from "./callback.ts";
+import { offerWorkoutFromTask } from "./workout.ts";
 import { logEvent } from "./events.ts";
 import type { Reply } from "./router.ts";
 import type { LocalNow } from "./time.ts";
@@ -22,6 +23,7 @@ interface BlockRow {
   start_min: number;
   end_min: number | null;
   estimate_min: number | null;
+  actual_min: number | null;
 }
 
 export function fmtMin(min: number): string {
@@ -58,7 +60,7 @@ export interface BlockContext {
 /** Tasks starting within (now, now + lead] get their reminder. One tick per task per start time. */
 export async function runBlockReminders(ctx: BlockContext, now: LocalNow): Promise<void> {
   const { results } = await ctx.db.prepare(
-    `SELECT id, title, start_min, end_min, estimate_min FROM tasks
+    `SELECT id, title, start_min, end_min, estimate_min, actual_min FROM tasks
       WHERE user_id = ? AND date = ? AND inbox = 0 AND done = 0 AND dropped = 0
         AND start_min IS NOT NULL AND start_min > ? AND start_min <= ?
       ORDER BY start_min, id`
@@ -79,7 +81,7 @@ export async function runBlockReminders(ctx: BlockContext, now: LocalNow): Promi
 // ---------- button handlers ----------
 
 async function taskOf(ctx: CallbackContext, taskId: number): Promise<BlockRow | null> {
-  return ctx.db.prepare("SELECT id, title, start_min, end_min, estimate_min FROM tasks WHERE id = ? AND user_id = ?")
+  return ctx.db.prepare("SELECT id, title, start_min, end_min, estimate_min, actual_min FROM tasks WHERE id = ? AND user_id = ?")
     .bind(taskId, ctx.userId).first<BlockRow>();
 }
 
@@ -94,9 +96,12 @@ export async function blockDone(ctx: CallbackContext, taskId: number): Promise<s
       text: `✓ 已完成 · Done\n${t.title}\n\n实际用了多久？ · How long did it take? (估计 ${t.estimate_min} 分钟)`,
       reply_markup: { inline_keyboard: [ACTUAL_CHOICES.map((m) => ({ text: `${m}分`, callback_data: cb.actualMin(taskId, m) }))] },
     });
+    await offerWorkoutFromTask(ctx, t);
     return "已完成 · Done";
   }
   await ctx.finish(`✓ 已完成 · Done\n${t.title}`);
+  // A workout-looking block offers to become a workout log (PRD-body §5.4); quiet for everything else.
+  await offerWorkoutFromTask(ctx, t);
   return "已完成 · Done";
 }
 
