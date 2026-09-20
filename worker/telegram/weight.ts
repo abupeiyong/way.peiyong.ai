@@ -156,7 +156,9 @@ export async function morningBodyBlock(
 async function logWeighIn(ctx: WeightContext, kg: number, opts: { note?: string; undo?: boolean } = {}): Promise<boolean> {
   // The same write as the Guide's log_weight proposal and POST /api/body/weight: one reading per date,
   // the latest wins, and goals.progress is recomputed from the new trend.
-  const r = await applyProposal(ctx.db, ctx.userId, { kind: "log_weight", date: ctx.today, kg, note: opts.note ?? "" });
+  const r = await applyProposal(
+    ctx.db, ctx.userId, { kind: "log_weight", date: ctx.today, kg, note: opts.note ?? "" }, { source: "telegram" }
+  );
   if (!r.ok) {
     await ctx.send({ text: `没能记下 · Could not log: ${r.error}` });
     return false;

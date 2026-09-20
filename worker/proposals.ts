@@ -2,7 +2,7 @@
 // so a tap and a click write the same rows. Nothing here runs without the user's approval.
 
 import type { GoalLevel, GuideProposal, ReviewPeriod, WorkoutIntensity } from "../shared/types.ts";
-import { DAILY_KCAL_RANGE, DEFAULT_WEEKLY_WORKOUTS, KG_RANGE, WEEKLY_WORKOUTS_RANGE } from "../shared/body.ts";
+import { DAILY_KCAL_RANGE, DEFAULT_WEEKLY_WORKOUTS, KG_RANGE, WEEKLY_WORKOUTS_RANGE, type WeightSource } from "../shared/body.ts";
 import { refreshBodyGoalProgress, saveBodyPlan } from "./body.ts";
 import { reviewPeriodStart, weekStartOf } from "./dates.ts";
 import { userToday } from "./telegram/time.ts";
@@ -34,7 +34,14 @@ async function findGoalByTitle(db: D1Database, userId: number, title: unknown): 
       .bind(userId, title.trim()).first<{ id: number }>());
 }
 
-export async function applyProposal(db: D1Database, userId: number, proposal: GuideProposal): Promise<ApplyResult> {
+/**
+ * Apply one approved proposal. `opts.source` names where a `log_weight` came from — the Guide by
+ * default, "telegram" when the bot logs a weigh-in of its own (PRD-body §5.1); the write itself is
+ * shared so that every path does the same upsert and the same progress refresh.
+ */
+export async function applyProposal(
+  db: D1Database, userId: number, proposal: GuideProposal, opts: { source?: WeightSource } = {}
+): Promise<ApplyResult> {
   if (!proposal || typeof proposal !== "object") return { ok: false, status: 400, error: "proposal must be an object" };
 
   if (proposal.kind === "create_goal") {
@@ -178,9 +185,9 @@ export async function applyProposal(db: D1Database, userId: number, proposal: Gu
     const kg = Math.round(value * 10) / 10;
     // One reading per local date (PRD-body §3): the latest wins.
     await db.prepare(
-      `INSERT INTO weight_logs (user_id, date, kg, source, note) VALUES (?, ?, ?, 'guide', ?)
+      `INSERT INTO weight_logs (user_id, date, kg, source, note) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (user_id, date) DO UPDATE SET kg = excluded.kg, source = excluded.source, note = excluded.note`
-    ).bind(userId, proposal.date, kg, String(proposal.note ?? "")).run();
+    ).bind(userId, proposal.date, kg, opts.source ?? "guide", String(proposal.note ?? "")).run();
     // goals.progress is derived for a goal with a body plan (PRD-body §4.3).
     await refreshBodyGoalProgress(db, userId, await todayOf(db, userId));
     return { ok: true, applied: "weight" };

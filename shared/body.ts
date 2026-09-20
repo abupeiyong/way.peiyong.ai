@@ -34,6 +34,17 @@ export function fromKg(kg: number, unit: WeightUnit): number {
   return Math.round((kg / WEIGHT_UNITS[unit]) * 10) / 10;
 }
 
+/**
+ * Where a weigh-in came from (`weight_logs.source`). Every write names its own: the bot and the web
+ * share one upsert, so without this they would all be labelled the same.
+ */
+export const WEIGHT_SOURCES = ["telegram", "web", "guide"] as const;
+export type WeightSource = (typeof WEIGHT_SOURCES)[number];
+
+export function isWeightSource(v: unknown): v is WeightSource {
+  return typeof v === "string" && (WEIGHT_SOURCES as readonly string[]).includes(v);
+}
+
 /** The verdict in words — `/body`, the Guide's prefix and the Body page all use these. */
 export const BODY_VERDICT_TEXT: Record<BodyVerdict, string> = {
   ahead: "提前 · ahead of the target date",
