@@ -1,3 +1,5 @@
+import type { WeightSource } from "./body.ts";
+
 export type GoalLevel = "lifetime" | "year" | "quarter" | "month" | "week";
 export type GoalType = "outcome" | "process" | "maintenance" | "learning";
 export type GoalStatus = "draft" | "active" | "at_risk" | "paused" | "completed" | "abandoned" | "archived";
@@ -244,7 +246,7 @@ export interface BodyPlan {
 export interface WeightLog {
   date: string;
   kg: number;
-  source: string;
+  source: WeightSource;
   note: string;
 }
 
