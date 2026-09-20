@@ -30,7 +30,7 @@ import { reviewAnswer } from "./review.ts";
 import {
   captureMessage, floodGuard, parseCommand, routeUpdate, SLOW_DOWN, type Reply, type TgUpdate,
 } from "./router.ts";
-import { mealNumbersAnswer, mealPhoto } from "./meal.ts";
+import { mealAnswer, mealNumbersAnswer, mealPhoto } from "./meal.ts";
 import { localDate } from "./schedule.ts";
 import { d1StateStore } from "./state.ts";
 import { topThreeAnswer } from "./topthree.ts";
@@ -195,6 +195,7 @@ async function dispatch(
     pendingState: async (_message, text) =>
       (await reviewAnswer(ctx, text)) || (await topThreeAnswer(ctx, text)) || (await weeklyPlanAnswer(ctx, text))
       || (await weightAnswer(ctx, text)) || (await workoutAnswer(ctx, text)) || (await mealNumbersAnswer(ctx, text))
+      || (await mealAnswer(ctx, text))
       || (await goalProgressAnswer(ctx, text))
       || (await timezoneAnswer(ctx, text))
       || (await onboardAnswer(ctx, text)),

@@ -102,15 +102,15 @@ export async function bodySummary(db: D1Database, userId: number, today: string)
   const weekStart = weekStartOf(today);
   let weights: WeightLog[] = [];
   let workouts: { minutes: number }[] = [];
-  let meals: { date: string; kcal: number | null }[] = [];
+  let meals: { date: string; description: string; kcal: number | null }[] = [];
   try {
     const [w, o, m] = await Promise.all([
       db.prepare("SELECT date, kg, source, note FROM weight_logs WHERE user_id = ? AND date <= ? AND date >= ? ORDER BY date")
         .bind(userId, today, addDays(today, -89)).all<WeightLog>(),
       db.prepare("SELECT minutes FROM workout_logs WHERE user_id = ? AND date BETWEEN ? AND ?")
         .bind(userId, weekStart, today).all<{ minutes: number }>(),
-      db.prepare("SELECT date, kcal FROM meal_logs WHERE user_id = ? AND date BETWEEN ? AND ?")
-        .bind(userId, weekStart, today).all<{ date: string; kcal: number | null }>(),
+      db.prepare("SELECT date, description, kcal FROM meal_logs WHERE user_id = ? AND date BETWEEN ? AND ?")
+        .bind(userId, weekStart, today).all<{ date: string; description: string; kcal: number | null }>(),
     ]);
     weights = w.results;
     workouts = o.results;
@@ -180,7 +180,8 @@ export async function bodySummary(db: D1Database, userId: number, today: string)
       workouts_target: plan.weekly_workouts,
       minutes: workouts.reduce((s, w) => s + w.minutes, 0),
       kcal_avg: kcalDays ? Math.round(kcalTotal / kcalDays) : null,
-      meals_logged: meals.length,
+      // A 「没吃」row (empty description, PRD-body §5.2) answers the prompt but is not a meal eaten.
+      meals_logged: meals.filter((m) => m.description.trim()).length,
     },
   };
 }

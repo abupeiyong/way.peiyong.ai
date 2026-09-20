@@ -4,6 +4,7 @@
 // re-checks ownership against the user resolved from the chat, not from the data.
 
 import { carryOver, deleteTask, updateTask } from "../tasks.ts";
+import type { MealKind } from "../../shared/types.ts";
 import { REVIEW_QUESTIONS } from "../../shared/reviews.ts";
 import type { GuideEnv } from "../guide.ts";
 import type { TelegramBot } from "./api.ts";
@@ -20,7 +21,7 @@ import { muteFor, settingsToggle, unlinkConfirm } from "./account.ts";
 import { proposalAnswer, taskAskGuide } from "./guide.ts";
 import { bodyNudgeAction, type BodyNudgeRule } from "./bodynudge.ts";
 import { MAX_WORKOUT_MIN, offerWorkoutFromTask, workoutFromTask, workoutPick, type WorkoutPick } from "./workout.ts";
-import { mealButton, type MealAction } from "./meal.ts";
+import { mealButton, mealPromptButton, type MealAction, type MealPromptAction } from "./meal.ts";
 import type { Reply } from "./router.ts";
 import type { TelegramStateStore } from "./state.ts";
 
@@ -51,6 +52,10 @@ const WORKOUT_CODES = { run: "r", strength: "s", walk: "w", other: "o", rest: "x
 
 /** The confirm card's buttons (PRD-body §5.2); `estimate` only appears on a meal with no numbers yet. */
 const MEAL_CODES = { confirm: "y", edit: "e", discard: "x", estimate: "g" } as const satisfies Record<MealAction, string>;
+
+/** The meal ask's own buttons (PRD-body §5.2); they carry the meal and the date, never a row id. */
+const MEAL_PROMPT_CODES = { skip: "s", none: "n" } as const satisfies Record<MealPromptAction, string>;
+const MEAL_KIND_CODES = { breakfast: "b", lunch: "l", dinner: "d", snack: "s" } as const satisfies Record<MealKind, string>;
 
 export type MuteSpan = "today" | "week" | "off";
 const MUTE_CODES = { today: "t", week: "w", off: "o" } as const satisfies Record<MuteSpan, string>;
@@ -99,6 +104,8 @@ type BodyNudge = `bn:${(typeof BODY_NUDGE_CODES)[BodyNudgeRule]}`;
 type WorkoutPickData = `wo:${(typeof WORKOUT_CODES)[WorkoutPick]}`;
 type WorkoutFromTask<Id extends Num, Min extends Num> = `wo:t:${Id}:${Min}`;
 type Meal<Id extends Num> = `ml:${Id}:${(typeof MEAL_CODES)[MealAction]}`;
+type MealPrompt<Date extends string> =
+  `ml:${(typeof MEAL_PROMPT_CODES)[MealPromptAction]}:${(typeof MEAL_KIND_CODES)[MealKind]}:${Date}`;
 
 export type Callback =
   | { verb: "task_done"; taskId: number }
@@ -136,7 +143,8 @@ export type Callback =
   | { verb: "body_nudge"; rule: BodyNudgeRule }
   | { verb: "workout_pick"; pick: WorkoutPick }
   | { verb: "workout_task"; taskId: number; min: number }
-  | { verb: "meal"; mealId: number; action: MealAction };
+  | { verb: "meal"; mealId: number; action: MealAction }
+  | { verb: "meal_prompt"; action: MealPromptAction; meal: MealKind; date: string };
 
 // Numeric bounds; the build-time assertion below is checked against their widest values.
 const MAX_OFFSET_DAYS = 365;
@@ -153,7 +161,7 @@ type Widest =
   | TopDone<"3", "2026-12-31"> | GoalProgress<MaxId, "100"> | GoalAct<MaxId> | GoalList | Weekly<"2026-12-31">
   | Block<MaxId> | Checkin<MaxId, "10"> | Login<MaxId> | Register | TimezonePick<"30"> | Settings | Mute | Unlink
   | DirectionSkip | ProposalAnswer<MaxId, "99"> | Brief | BodyNudge
-  | WorkoutPickData | WorkoutFromTask<MaxId, "600"> | Meal<MaxId>;
+  | WorkoutPickData | WorkoutFromTask<MaxId, "600"> | Meal<MaxId> | MealPrompt<"2026-12-31">;
 type Budget<N extends number, T extends 0[] = []> = T["length"] extends N ? T : Budget<N, [...T, 0]>;
 type Fits<S extends string, B extends 0[]> = S extends `${infer _}${infer Rest}`
   ? B extends [0, ...infer Left extends 0[]] ? Fits<Rest, Left> : false
@@ -305,6 +313,11 @@ export function parseCallback(data: string): Callback | null {
         ? { verb: "workout_task", taskId, min } : null;
     }
     case "ml": {
+      if (p.length === 4) {
+        const action = codeOf<MealPromptAction>(MEAL_PROMPT_CODES, p[1]);
+        const meal = codeOf<MealKind>(MEAL_KIND_CODES, p[2]);
+        return action && meal && isDate(p[3]) ? { verb: "meal_prompt", action, meal, date: p[3] } : null;
+      }
       const mealId = toId(p[1]), action = codeOf<MealAction>(MEAL_CODES, p[2]);
       return p.length === 3 && mealId !== null && action ? { verb: "meal", mealId, action } : null;
     }
@@ -363,6 +376,8 @@ export const cb = {
   workoutPick: (pick: WorkoutPick): WorkoutPickData => checked(`wo:${WORKOUT_CODES[pick]}` as const),
   workoutTask: (taskId: number, min: number): WorkoutFromTask<number, number> => checked(`wo:t:${taskId}:${min}` as const),
   meal: (mealId: number, action: MealAction): Meal<number> => checked(`ml:${mealId}:${MEAL_CODES[action]}` as const),
+  mealPrompt: (action: MealPromptAction, meal: MealKind, date: string): MealPrompt<string> =>
+    checked(`ml:${MEAL_PROMPT_CODES[action]}:${MEAL_KIND_CODES[meal]}:${date}` as const),
 };
 
 // ---------- handlers ----------
@@ -454,6 +469,7 @@ async function dispatch(ctx: CallbackContext, p: Callback): Promise<string | und
     case "workout_pick": return workoutPick(ctx, p.pick);
     case "workout_task": return workoutFromTask(ctx, p.taskId, p.min);
     case "meal": return mealButton(ctx, p.mealId, p.action);
+    case "meal_prompt": return mealPromptButton(ctx, p.action, p.meal, p.date);
   }
 }
 

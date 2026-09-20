@@ -18,6 +18,8 @@
 //
 // Kinds (PRD §6): morning (brief + the ask) · review_prompt · weekly_plan (Mon) · weekly_review (Sun) ·
 // midday_nudge (11:00, only while the top three is empty) · area_checkin (1st of the month) ·
+// meal_breakfast / meal_lunch / meal_dinner (telegram_prefs.breakfast_at / lunch_at / dinner_at, only with a
+// body plan and no log of that meal today — PRD-body §5.2) ·
 // workout_check (telegram_prefs.workout_at, only with a body plan and nothing logged today — PRD-body §5.4) ·
 // body_nudge (12:00, only when one of the four body rules is true — PRD-body §6.2).
 // The Sunday body recap rides inside weekly_review (weekly.ts), so the week stays one conversation.
@@ -29,6 +31,7 @@ import { sendReply, sendReplyId, TelegramApiError, TelegramBot } from "./api.ts"
 import { runBlockReminders } from "./blocks.ts";
 import { bodyNudgeDue, sendBodyNudge } from "./bodynudge.ts";
 import { sendCheckin } from "./checkin.ts";
+import { mealAskDue, sendMealAsk } from "./meal.ts";
 import { sendMorning } from "./compose.ts";
 import { logEvent } from "./events.ts";
 import { startReview } from "./review.ts";
@@ -145,6 +148,10 @@ const KINDS: ScheduleKind[] = [
   { kind: "weekly_review", slot: (p) => p.weekly_review_at, windowMin: 15, cadence: (_, now) => now.weekday === 0, send: sendWeeklyReview },
   { kind: "midday_nudge", slot: (p) => (p.nudges ? NUDGE_AT : null), windowMin: 15, cadence: daily, condition: topThreeEmpty, send: sendNudge },
   { kind: "area_checkin", slot: (p) => p.checkin_at, windowMin: 15, cadence: (_, now) => now.date.endsWith("-01"), send: sendCheckin },
+  // The three meal asks are silent on a meal that is already logged — 没吃 counts as logged too (meal.ts).
+  { kind: "meal_breakfast", slot: (p) => p.breakfast_at, windowMin: 15, cadence: daily, condition: (ctx) => mealAskDue(ctx, "breakfast"), send: (ctx) => sendMealAsk(ctx, "breakfast") },
+  { kind: "meal_lunch", slot: (p) => p.lunch_at, windowMin: 15, cadence: daily, condition: (ctx) => mealAskDue(ctx, "lunch"), send: (ctx) => sendMealAsk(ctx, "lunch") },
+  { kind: "meal_dinner", slot: (p) => p.dinner_at, windowMin: 15, cadence: daily, condition: (ctx) => mealAskDue(ctx, "dinner"), send: (ctx) => sendMealAsk(ctx, "dinner") },
   // The evening check is silent on a day that already has a workout (or a rest day) logged (workout.ts).
   { kind: "workout_check", slot: (p) => p.workout_at, windowMin: 15, cadence: daily, condition: workoutCheckDue, send: sendWorkoutCheck },
   // The body nudge sends at most one message a day, and each of its rules at most once a week (bodynudge.ts).

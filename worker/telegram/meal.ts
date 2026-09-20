@@ -1,6 +1,11 @@
-// Meal photos (docs/PRD-body.md §5.2, §5.3, §12). One photo is one meal.
+// Meals (docs/PRD-body.md §5.2, §5.3, §11, §12). One photo — or one line — is one meal.
+//   meal_*        → the three conditional asks (telegram_prefs.breakfast_at / lunch_at / dinner_at), sent only
+//                   when a body plan exists and that meal has no log yet; `[跳过] [没吃]` and
+//                   `awaiting_meal:<kind>` for 2 h
+//   /meal …       → `/meal 午 牛肉面`: the meal from the word, else from the local time; with no text, the ask
 //   router step 0 → a photo while `awaiting_meal:<kind>` is pending, or any photo captioned #meal / #饭,
 //                   goes to analysis; every other photo keeps the plain "text and voice only" reply
+//   router step 3 → a line while the ask is open is the meal itself: a row with the words and no numbers
 //   analysis      → getFile + download into memory (never stored; meal_logs.tg_file_id is the only
 //                   reference kept, so a better model can re-read the same photo later, §12)
 //   model         → the OpenAI-compatible endpoint with image content when OPENAI_VISION_MODEL is set,
@@ -10,12 +15,15 @@
 //                   drops every number, and `confidence: low` adds 看不太清
 //   ml:<id>:…     → ✓ 记下 · ✏️ 改数字 (a ForceReply for `kcal[/protein]`, user_edited = 1) · 🗑 不记 ·
 //                   估算 (the same JSON from a text-only prompt, for a meal that has no numbers yet)
+//   ml:s|n:…      → 跳过 (nothing written; the day's outbox claim keeps the ask from repeating) · 没吃
+//                   (an empty row for that meal, so the condition below reads it as answered)
 //
 // Every estimate carries the disclaimer; nothing here ever claims to be a measurement. Ten analyses per
 // user per local day (telegram_events kind `photo`); the per-minute flood guard in webhook.ts already
 // counts a photo like any other message, so this is the only extra limit.
 
 import type { MealKind } from "../../shared/types.ts";
+import { loadBodyPlan } from "../body.ts";
 import type { GuideEnv } from "../guide.ts";
 import { fmtMin } from "./blocks.ts";
 import { cb, type CallbackContext } from "./callback.ts";
@@ -27,6 +35,15 @@ import { localNow } from "./time.ts";
 export const MEAL_ACTIONS = ["confirm", "edit", "discard", "estimate"] as const;
 export type MealAction = (typeof MEAL_ACTIONS)[number];
 
+/** The buttons of the ask itself (§5.2): 跳过 writes nothing, 没吃 writes an empty row for that meal. */
+export const MEAL_PROMPT_ACTIONS = ["skip", "none"] as const;
+export type MealPromptAction = (typeof MEAL_PROMPT_ACTIONS)[number];
+
+/** The meals that get their own scheduled ask (§6); a snack is only ever logged by hand. */
+export const MEAL_PROMPT_KINDS = ["breakfast", "lunch", "dinner"] as const;
+
+/** How long a meal ask waits for the photo or the line (§5.2). */
+export const MEAL_ASK_SECONDS = 2 * 60 * 60;
 /** How long `✏️ 改数字` waits for the numbers. */
 export const MEAL_NUMBERS_SECONDS = 2 * 60 * 60;
 /** Photo analyses per user per local day (§12). */
@@ -53,12 +70,50 @@ const KIND_LABEL: Record<MealKind, string> = {
   snack: "🍎 加餐 · Snack",
 };
 
-/** Which meal a photo sent at `minutes` past local midnight is, when nothing was pending (§5.2). */
+/** The ask of §5.2, one per meal. */
+const ASK_TEXT: Record<MealKind, string> = {
+  breakfast: "🍳 早饭吃了什么？发张照片或一句话 · Breakfast? A photo or a line",
+  lunch: "🍜 午饭吃了什么？发张照片或一句话 · Lunch? A photo or a line",
+  dinner: "🍲 晚饭吃了什么？发张照片或一句话 · Dinner? A photo or a line",
+  snack: "🍎 加餐吃了什么？发张照片或一句话 · Snack? A photo or a line",
+};
+
+/** Which meal a photo or a `/meal` with no word is, from `minutes` past local midnight (§11). */
 export function mealKindAt(minutes: number): MealKind {
   if (minutes < 10 * 60 + 30) return "breakfast";
   if (minutes < 15 * 60) return "lunch";
-  if (minutes < 22 * 60) return "dinner";
+  if (minutes < 21 * 60) return "dinner";
   return "snack";
+}
+
+/** The words `/meal 早|午|晚|加餐 …` accepts. */
+const KIND_WORDS: Record<string, MealKind> = {
+  "早": "breakfast", "早饭": "breakfast", "早餐": "breakfast", "早上": "breakfast", breakfast: "breakfast",
+  "午": "lunch", "午饭": "lunch", "午餐": "lunch", "中饭": "lunch", "中午": "lunch", lunch: "lunch",
+  "晚": "dinner", "晚饭": "dinner", "晚餐": "dinner", dinner: "dinner", supper: "dinner",
+  "加餐": "snack", "零食": "snack", "夜宵": "snack", snack: "snack",
+};
+/** The multi-character words that may be written straight against the food (`午饭牛肉面`), longest first. */
+const GLUED_WORDS = Object.keys(KIND_WORDS).filter((w) => w.length > 1 && !/^[a-z]+$/.test(w))
+  .sort((a, b) => b.length - a.length);
+
+export function mealKindFromWord(word: string): MealKind | null {
+  return KIND_WORDS[word.trim().toLowerCase()] ?? null;
+}
+
+/** `午 牛肉面`, `午饭牛肉面`, `牛肉面`, `` → which meal, and what was eaten (empty = open the ask). */
+export function splitMealArgs(args: string, minutes: number): { kind: MealKind; text: string } {
+  const trimmed = args.trim();
+  const spaced = /^(\S+)\s+([\s\S]+)$/.exec(trimmed);
+  if (spaced) {
+    const kind = mealKindFromWord(spaced[1]);
+    if (kind) return { kind, text: spaced[2].trim() };
+  }
+  const only = mealKindFromWord(trimmed);
+  if (only) return { kind: only, text: "" };
+  const glued = GLUED_WORDS.find((w) => trimmed.length > w.length && trimmed.startsWith(w));
+  if (glued) return { kind: KIND_WORDS[glued], text: trimmed.slice(glued.length).trim() };
+  return { kind: mealKindAt(minutes), text: trimmed };
 }
 
 // ---------- the model's JSON (§5.3) ----------
@@ -329,6 +384,130 @@ function isMealNumbersState(v: unknown): v is MealNumbersState {
   const s = v as Partial<MealNumbersState> | null;
   return !!s && typeof s === "object" && s.kind === "awaiting_meal_numbers"
     && typeof s.meal_id === "number" && typeof s.expires_at === "number";
+}
+
+// ---------- the meal ask (§5.2, §6): meal_breakfast / meal_lunch / meal_dinner ----------
+
+/** The card the three scheduled asks (and `/meal` with no text) send; the buttons are `ml:s|n:<kind>:<date>`. */
+export function mealAskCard(kind: MealKind, date: string): Reply {
+  return {
+    text: ASK_TEXT[kind],
+    reply_markup: {
+      inline_keyboard: [[
+        { text: "跳过 · Skip", callback_data: cb.mealPrompt("skip", kind, date) },
+        { text: "没吃 · Didn't eat", callback_data: cb.mealPrompt("none", kind, date) },
+      ]],
+    },
+  };
+}
+
+export type MealAskContext = Pick<CallbackContext, "db" | "userId" | "today" | "state" | "send">;
+
+/** Ask for one meal and wait 2 h for the answer — a photo (mealPhoto) or a line (mealAnswer). */
+export async function askMeal(ctx: MealAskContext, kind: MealKind): Promise<void> {
+  const state: MealState = {
+    kind: "awaiting_meal", meal: kind, date: ctx.today, expires_at: Date.now() + MEAL_ASK_SECONDS * 1000,
+  };
+  await ctx.state.put(state, MEAL_ASK_SECONDS);
+  await ctx.send(mealAskCard(kind, ctx.today));
+}
+
+/** True when today already has a log of this meal — and on an error, so nothing is asked twice. */
+async function hasMealToday(db: D1Database, userId: number, date: string, kind: MealKind): Promise<boolean> {
+  try {
+    const row = await db.prepare("SELECT 1 AS n FROM meal_logs WHERE user_id = ? AND date = ? AND kind = ? LIMIT 1")
+      .bind(userId, date, kind).first<{ n: number }>();
+    return !!row;
+  } catch {
+    return true; // migration 0004 has not run here
+  }
+}
+
+/** The scheduler's condition (§6): a plan, and nothing logged for that meal today. 没吃 counts as logged. */
+export async function mealAskDue(ctx: MealAskContext, kind: MealKind): Promise<boolean> {
+  if (!(await loadBodyPlan(ctx.db, ctx.userId))) return false;
+  return !(await hasMealToday(ctx.db, ctx.userId, ctx.today, kind));
+}
+
+export function sendMealAsk(ctx: MealAskContext, kind: MealKind): Promise<void> {
+  return askMeal(ctx, kind);
+}
+
+// ---------- logging a meal by text (§5.2) ----------
+
+export type MealTextContext = Pick<CallbackContext, "db" | "userId" | "today" | "timezone" | "send">;
+
+/** One typed meal: the words as the description, no numbers — the card's `[估算]` is what asks for those. */
+async function logMealText(ctx: MealTextContext, kind: MealKind, description: string, date: string): Promise<void> {
+  const row = await insertMeal(ctx.db, ctx.userId, {
+    date, time_min: localMinutes(ctx.timezone), kind, description,
+    estimate: null, tg_file_id: null, ai_json: null,
+  });
+  await ctx.send(row ? mealCard(row) : { text: COULD_NOT_LOG });
+}
+
+/**
+ * Router step 3: a typed answer while a meal ask is open. Everything the user writes is the meal, so an
+ * empty line is the only thing that falls through to capture.
+ */
+export async function mealAnswer(ctx: MealTextContext & Pick<CallbackContext, "state">, text: string): Promise<boolean> {
+  const state = await ctx.state.get();
+  if (!isMealState(state)) return false;
+  if (Date.now() > state.expires_at) {
+    await ctx.state.clear();
+    return false;
+  }
+  const description = text.trim();
+  if (!description) return false;
+  await ctx.state.clear();
+  await logReply(ctx.db, ctx.userId, `meal_${state.meal}`, ctx.today);
+  await logMealText(ctx, state.meal, description, state.date);
+  return true;
+}
+
+// ---------- /meal [早|午|晚|加餐] <text> (§11) ----------
+
+const MEAL_USAGE: Reply = {
+  text: "用法 · Usage: /meal 牛肉面\n可以先说哪一餐 · name the meal first if you like: /meal 午 牛肉面（早|午|晚|加餐）",
+};
+
+export async function mealCommand(ctx: CallbackContext, args: string): Promise<void> {
+  const { kind, text } = splitMealArgs(args, localMinutes(ctx.timezone));
+  if (!text) {
+    await askMeal(ctx, kind);
+    return;
+  }
+  if (text.length > 300) {
+    await ctx.send(MEAL_USAGE);
+    return;
+  }
+  await logMealText(ctx, kind, text, ctx.today);
+}
+
+// ---------- ml:s:<kind>:<date> · ml:n:<kind>:<date> ----------
+
+/** `跳过` and `没吃` on a meal ask. 没吃 writes an empty row, so the ask does not come back for that meal. */
+export async function mealPromptButton(
+  ctx: CallbackContext, action: MealPromptAction, kind: MealKind, date: string,
+): Promise<string> {
+  await logReply(ctx.db, ctx.userId, `meal_${kind}`, ctx.today);
+  const pending = await ctx.state.get();
+  if (isMealState(pending) && pending.meal === kind && pending.date === date) await ctx.state.clear();
+  if (action === "skip") {
+    await ctx.finish(`⏭ 跳过 · Skipped\n${kindLabel(kind)}`);
+    return "已跳过 · Skipped";
+  }
+  if (await hasMealToday(ctx.db, ctx.userId, date, kind)) {
+    await ctx.finish(`${kindLabel(kind)} 已经记过了 · Already logged`);
+    return "已记过 · Already logged";
+  }
+  const row = await insertMeal(ctx.db, ctx.userId, {
+    date, time_min: localMinutes(ctx.timezone), kind, description: "",
+    estimate: null, tg_file_id: null, ai_json: null,
+  });
+  if (!row) return COULD_NOT_LOG;
+  await ctx.finish(`🍽 没吃 · Didn't eat\n${kindLabel(kind)}`);
+  return "已记下 · Logged";
 }
 
 // ---------- the photo path ----------
