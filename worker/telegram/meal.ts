@@ -31,8 +31,11 @@ import { logEvent, logReply } from "./events.ts";
 import type { Reply, TgMessage, TgPhotoSize } from "./router.ts";
 import { localNow } from "./time.ts";
 
-/** The buttons of the confirm card (§5.2); `estimate` is the `[估算]` offered when a meal has no numbers. */
-export const MEAL_ACTIONS = ["confirm", "edit", "discard", "estimate"] as const;
+/**
+ * The buttons of the confirm card (§5.2); `estimate` is the `[估算]` offered when a meal has no numbers,
+ * `reanalyze` the `[🔄 重新分析]` offered on a meal that still has its photo (§13 item 12).
+ */
+export const MEAL_ACTIONS = ["confirm", "edit", "discard", "estimate", "reanalyze"] as const;
 export type MealAction = (typeof MEAL_ACTIONS)[number];
 
 /** The buttons of the ask itself (§5.2): 跳过 writes nothing, 没吃 writes an empty row for that meal. */
@@ -197,6 +200,94 @@ export function dishLine(estimate: MealEstimate): string {
   return estimate.dishes.map((d) => (d.portion ? `${d.name}（${d.portion}）` : d.name)).join("、").slice(0, 300);
 }
 
+// ---------- per-dish corrections (§13 item 12) ----------
+
+/** The dishes of a description are separated by 、, and a portion rides in brackets after the name. */
+const DISH_SEPARATOR = /[、,]/;
+
+/** `牛肉面（约 1 碗）` → `牛肉面`; lower-cased and capped, so the same dish always keys the same row. */
+export function normalizeDish(name: string): string {
+  return name
+    .replace(/[（(][^）)]*[）)]/g, " ")
+    .replace(/[×xX*]\s*\d+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+    .slice(0, 40);
+}
+
+/** The dish names in a stored description, normalised; empty when it does not read as a dish list. */
+export function dishesOf(description: string): string[] {
+  return description.split(DISH_SEPARATOR).map(normalizeDish).filter((d) => d.length > 0);
+}
+
+/**
+ * Remember the user's own numbers for a meal that is exactly one dish ("my 牛肉面 is ~550 kcal"), so the
+ * next estimate of that dish uses them. A meal of several dishes teaches nothing: the correction cannot
+ * be attributed to one of them, so nothing is written.
+ */
+export async function rememberDish(
+  db: D1Database, userId: number, description: string, kcal: number | null, proteinG: number | null,
+): Promise<string | null> {
+  const dishes = dishesOf(description);
+  if (dishes.length !== 1 || kcal === null) return null;
+  try {
+    await db.prepare(
+      `INSERT INTO meal_dish_notes (user_id, dish, kcal, protein_g) VALUES (?, ?, ?, ?)
+       ON CONFLICT (user_id, dish) DO UPDATE SET
+         kcal = excluded.kcal, protein_g = COALESCE(excluded.protein_g, meal_dish_notes.protein_g),
+         samples = meal_dish_notes.samples + 1, updated_at = datetime('now')`
+    ).bind(userId, dishes[0], kcal, proteinG).run();
+    return dishes[0];
+  } catch (e) {
+    console.error("telegram meal: dish note failed", e); // migration 0005 has not run here
+    return null;
+  }
+}
+
+/**
+ * Replace the model's numbers with the user's own wherever a dish has been corrected before, then
+ * re-total. Returns the dishes that were overridden, so the card can say whose numbers these are.
+ */
+export async function applyDishNotes(
+  db: D1Database, userId: number, estimate: MealEstimate,
+): Promise<{ estimate: MealEstimate; used: string[] }> {
+  const wanted = [...new Set(estimate.dishes.map((d) => normalizeDish(d.name)).filter(Boolean))];
+  if (!wanted.length) return { estimate, used: [] };
+  let notes: { dish: string; kcal: number | null; protein_g: number | null }[] = [];
+  try {
+    const { results } = await db.prepare(
+      `SELECT dish, kcal, protein_g FROM meal_dish_notes WHERE user_id = ? AND dish IN (${wanted.map(() => "?").join(",")})`
+    ).bind(userId, ...wanted).all<{ dish: string; kcal: number | null; protein_g: number | null }>();
+    notes = results;
+  } catch {
+    return { estimate, used: [] }; // migration 0005 has not run here
+  }
+  if (!notes.length) return { estimate, used: [] };
+  const byDish = new Map(notes.map((n) => [n.dish, n]));
+  const used: string[] = [];
+  const dishes = estimate.dishes.map((d) => {
+    const note = byDish.get(normalizeDish(d.name));
+    if (!note || note.kcal === null) return d;
+    used.push(d.name);
+    return { ...d, kcal: note.kcal, protein_g: note.protein_g ?? d.protein_g };
+  });
+  if (!used.length) return { estimate, used: [] };
+  const total = (pick: (d: MealDish) => number | null): number | null => {
+    const parts = dishes.map(pick).filter((n): n is number => n !== null);
+    return parts.length === dishes.length ? parts.reduce((a, b) => a + b, 0) : null;
+  };
+  return {
+    estimate: { ...estimate, dishes, total_kcal: total((d) => d.kcal), total_protein_g: total((d) => d.protein_g) },
+    used,
+  };
+}
+
+/** The line the card adds when an estimate used numbers the user had corrected before. */
+export function dishNoteLine(used: string[]): string {
+  return `用了你改过的数字 · your own numbers for ${used.join("、")}`;
+}
+
 // ---------- the model calls ----------
 
 /** Whether this deployment can read a photo at all (§5.3). */
@@ -262,7 +353,12 @@ interface MealRow {
   protein_g: number | null;
   user_edited: number;
   confidence: string | null;
+  /** The Telegram photo this meal came from, when it came from one — what re-analysis re-reads (§12). */
+  tg_file_id: string | null;
 }
+
+/** Every column the card needs, in one place: the confirm card is drawn from exactly these. */
+const MEAL_COLUMNS = "id, date, time_min, kind, description, kcal, protein_g, user_edited, confidence, tg_file_id";
 
 interface MealWrite {
   date: string;
@@ -280,7 +376,7 @@ async function insertMeal(db: D1Database, userId: number, m: MealWrite): Promise
     return await db.prepare(
       `INSERT INTO meal_logs (user_id, date, time_min, kind, description, kcal, protein_g, tg_file_id, ai_json, confidence)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       RETURNING id, date, time_min, kind, description, kcal, protein_g, user_edited, confidence`
+       RETURNING ${MEAL_COLUMNS}`
     ).bind(
       userId, m.date, m.time_min, m.kind, m.description.slice(0, 300),
       m.estimate?.total_kcal ?? null, m.estimate?.total_protein_g ?? null,
@@ -295,7 +391,7 @@ async function insertMeal(db: D1Database, userId: number, m: MealWrite): Promise
 async function loadMeal(db: D1Database, userId: number, id: number): Promise<MealRow | null> {
   try {
     return await db.prepare(
-      "SELECT id, date, time_min, kind, description, kcal, protein_g, user_edited, confidence FROM meal_logs WHERE id = ? AND user_id = ?"
+      `SELECT ${MEAL_COLUMNS} FROM meal_logs WHERE id = ? AND user_id = ?`
     ).bind(id, userId).first<MealRow>();
   } catch {
     return null;
@@ -346,12 +442,18 @@ function mealCard(row: MealRow, note?: string): Reply {
   if (row.kcal === null && row.description) {
     buttons.push([{ text: "估算 · estimate", callback_data: cb.meal(row.id, "estimate") }]);
   }
+  // The photo is still on Telegram, so a better model can read it again (§13 item 12).
+  if (row.tg_file_id) {
+    buttons.push([{ text: "🔄 重新分析 · re-analyse", callback_data: cb.meal(row.id, "reanalyze") }]);
+  }
   return { text: mealText(row, note), reply_markup: { inline_keyboard: buttons } };
 }
 
 const NO_VISION_NOTE = "这台服务器没有配置看图模型，照片先记下了 · No vision model here — the photo is logged, without numbers";
 const LIMIT_NOTE = `今天的照片估算已用完（${PHOTO_ANALYSES_PER_DAY} 次），照片先记下了 · That's today's ${PHOTO_ANALYSES_PER_DAY} photo estimates — logged without numbers`;
 const UNREADABLE_NOTE = "没算出数字 · Couldn't put numbers on it";
+const EDITED_NOTE = "你改过这一餐的数字，重新分析会覆盖 · You set these numbers yourself — 先改回估算再试";
+const NO_PHOTO_NOTE = "这一餐没有照片可以重看 · No photo to re-read";
 const NO_MODEL_NOTE = "这台服务器没有配置模型 · No model is configured here";
 const COULD_NOT_LOG = "没能记下 · Could not log it — 请稍后再试";
 
@@ -572,10 +674,12 @@ export async function mealPhoto(ctx: MealPhotoContext, message: TgMessage, capti
       cardNote = UNREADABLE_NOTE;
     } else {
       write.ai_json = raw;
-      const estimate = parseMealEstimate(raw);
-      if (estimate) {
+      const parsed = parseMealEstimate(raw);
+      if (parsed) {
+        const { estimate, used } = await applyDishNotes(ctx.db, ctx.userId, parsed);
         write.estimate = estimate;
         write.description = dishLine(estimate) || note;
+        if (used.length) cardNote = dishNoteLine(used);
       } else {
         // §5.3: a parse failure keeps what the model could read and drops every number.
         write.description = note || raw.replace(/\s+/g, " ").trim().slice(0, 200);
@@ -647,31 +751,75 @@ export async function mealButton(ctx: CallbackContext, mealId: number, action: M
       } catch (e) {
         console.error("telegram meal: text estimate failed", e);
       }
-      const estimate = raw === null ? null : parseMealEstimate(raw);
-      if (!estimate || (estimate.total_kcal === null && estimate.total_protein_g === null)) {
+      const parsed = raw === null ? null : parseMealEstimate(raw);
+      if (!parsed || (parsed.total_kcal === null && parsed.total_protein_g === null)) {
         await ctx.edit(mealCard(row, raw === null ? NO_MODEL_NOTE : UNREADABLE_NOTE));
         return raw === null ? NO_MODEL_NOTE : UNREADABLE_NOTE;
       }
+      const { estimate, used } = await applyDishNotes(ctx.db, ctx.userId, parsed);
       const updated = await setMealNumbers(ctx, mealId, estimate.total_kcal, estimate.total_protein_g, {
         confidence: estimate.confidence, userEdited: false,
       });
-      await ctx.edit(mealCard(updated ?? row));
+      await ctx.edit(mealCard(updated ?? row, used.length ? dishNoteLine(used) : undefined));
       return "已估算 · Estimated";
     }
+    case "reanalyze": return mealReanalyze(ctx, row);
   }
+}
+
+/**
+ * `🔄 重新分析` (§13 item 12): read the same photo again with whatever vision model is configured now,
+ * and redraw the card. Numbers the user typed themselves are never overwritten, and the re-read counts
+ * against the day's ten analyses like any other.
+ */
+async function mealReanalyze(ctx: CallbackContext, row: MealRow): Promise<string> {
+  if (!row.tg_file_id) return NO_PHOTO_NOTE;
+  if (row.user_edited) {
+    await ctx.edit(mealCard(row, EDITED_NOTE));
+    return "你改过数字了 · Your own numbers";
+  }
+  if (!hasVisionModel(ctx.guide)) {
+    await ctx.edit(mealCard(row, NO_VISION_NOTE));
+    return NO_VISION_NOTE;
+  }
+  if ((await analysesToday(ctx.db, ctx.userId, ctx.today)) >= PHOTO_ANALYSES_PER_DAY) {
+    await ctx.edit(mealCard(row, LIMIT_NOTE));
+    return LIMIT_NOTE;
+  }
+  await logEvent(ctx.db, ctx.userId, "photo", "used", { local_date: ctx.today });
+  await ctx.typing();
+  const raw = await readPhoto(ctx, row.tg_file_id);
+  const parsed = raw === null ? null : parseMealEstimate(raw);
+  if (!parsed) {
+    await logEvent(ctx.db, ctx.userId, "photo", "error", { local_date: ctx.today });
+    await ctx.edit(mealCard(row, UNREADABLE_NOTE));
+    return UNREADABLE_NOTE;
+  }
+  const { estimate, used } = await applyDishNotes(ctx.db, ctx.userId, parsed);
+  const updated = await setMealNumbers(ctx, row.id, estimate.total_kcal, estimate.total_protein_g, {
+    confidence: estimate.confidence, userEdited: false, description: dishLine(estimate) || row.description,
+    aiJson: raw ?? undefined,
+  });
+  await ctx.edit(mealCard(updated ?? row, used.length ? dishNoteLine(used) : undefined));
+  return "已重新分析 · Re-analysed";
 }
 
 async function setMealNumbers(
   ctx: Pick<CallbackContext, "db" | "userId">, mealId: number,
   kcal: number | null, proteinG: number | null,
-  opts: { confidence?: string | null; userEdited: boolean },
+  opts: { confidence?: string | null; userEdited: boolean; description?: string; aiJson?: string },
 ): Promise<MealRow | null> {
   try {
     return await ctx.db.prepare(
-      `UPDATE meal_logs SET kcal = ?, protein_g = COALESCE(?, protein_g), user_edited = ?, confidence = ?
+      `UPDATE meal_logs SET kcal = ?, protein_g = COALESCE(?, protein_g), user_edited = ?, confidence = ?,
+              description = COALESCE(?, description), ai_json = COALESCE(?, ai_json)
         WHERE id = ? AND user_id = ?
-       RETURNING id, date, time_min, kind, description, kcal, protein_g, user_edited, confidence`
-    ).bind(kcal, proteinG, opts.userEdited ? 1 : 0, opts.confidence ?? null, mealId, ctx.userId).first<MealRow>();
+       RETURNING ${MEAL_COLUMNS}`
+    ).bind(
+      kcal, proteinG, opts.userEdited ? 1 : 0, opts.confidence ?? null,
+      opts.description?.slice(0, 300) ?? null, opts.aiJson?.slice(0, 4000) ?? null,
+      mealId, ctx.userId,
+    ).first<MealRow>();
   } catch (e) {
     console.error("telegram meal: update failed", e);
     return null;
@@ -696,6 +844,12 @@ export async function mealNumbersAnswer(
   // The user's numbers replace the estimate and stop being one (§5.2).
   const row = await setMealNumbers(ctx, state.meal_id, numbers.kcal, numbers.protein_g, { userEdited: true });
   await ctx.state.clear();
-  await ctx.send({ text: row ? `✓ ${mealText(row)}` : COULD_NOT_LOG });
+  // A one-dish meal teaches the next estimate of that dish (§13 item 12).
+  const learned = row ? await rememberDish(ctx.db, ctx.userId, row.description, numbers.kcal, numbers.protein_g) : null;
+  await ctx.send({
+    text: row
+      ? `✓ ${mealText(row)}${learned ? `\n下次 ${learned} 就用这个数 · remembered for next time` : ""}`
+      : COULD_NOT_LOG,
+  });
   return true;
 }

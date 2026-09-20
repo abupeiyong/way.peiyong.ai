@@ -23,7 +23,10 @@
 // meal_breakfast / meal_lunch / meal_dinner (telegram_prefs.breakfast_at / lunch_at / dinner_at, only with a
 // body plan and no log of that meal today — PRD-body §5.2) ·
 // workout_check (telegram_prefs.workout_at, only with a body plan and nothing logged today — PRD-body §5.4) ·
-// body_nudge (12:00, only when one of the four body rules is true — PRD-body §6.2).
+// body_nudge (12:00, only when one of the four body rules is true — PRD-body §6.2) ·
+// body_month (telegram_prefs.body_month_at, the 1st of the month: last month's body numbers — PRD-body §13) ·
+// body_adapt (Monday 09:30, only when one of the body asks is at least half an hour off the time the user
+// actually logs at; it proposes, it never changes a slot — PRD-body §13).
 // The Sunday body recap rides inside weekly_review (weekly.ts), so the week stays one conversation.
 //
 // Scaling: one query per tick is fine into the low hundreds of linked users; past that, precompute
@@ -32,6 +35,8 @@
 import { sendReply, sendReplyId, TelegramApiError, TelegramBot } from "./api.ts";
 import { runBlockReminders } from "./blocks.ts";
 import { bodyNudgeDue, sendBodyNudge } from "./bodynudge.ts";
+import { bodyMonthDue, sendBodyMonth } from "./bodymonth.ts";
+import { adaptDue, sendAdapt } from "./adapt.ts";
 import { sendCheckin } from "./checkin.ts";
 import { mealAskDue, sendMealAsk } from "./meal.ts";
 import { sendMorning } from "./compose.ts";
@@ -66,6 +71,8 @@ export const DISCONNECTED_UNTIL = "9999-12-31 23:59:59";
 const NUDGE_AT = "11:00";
 /** The body nudge's fixed slot (PRD-body §6.2): the rules are checked at noon. */
 const BODY_NUDGE_AT = "12:00";
+/** The adaptive-time suggestion's fixed slot (PRD-body §13): once a week, after Monday's plan. */
+const BODY_ADAPT_AT = "09:30";
 
 export function isDisconnected(pausedUntil: string | null | undefined): boolean {
   return !!pausedUntil && pausedUntil >= DISCONNECTED_UNTIL;
@@ -162,6 +169,10 @@ const KINDS: ScheduleKind[] = [
   { kind: "workout_check", slot: (p) => p.workout_at, windowMin: 15, cadence: daily, condition: workoutCheckDue, send: sendWorkoutCheck },
   // The body nudge sends at most one message a day, and each of its rules at most once a week (bodynudge.ts).
   { kind: "body_nudge", slot: (p) => (p.body_nudges ? BODY_NUDGE_AT : null), windowMin: 15, cadence: daily, condition: bodyNudgeDue, send: sendBodyNudge },
+  // Last month's body numbers, on the 1st; silent when the month has nothing in it (bodymonth.ts).
+  { kind: "body_month", slot: (p) => p.body_month_at, windowMin: 15, cadence: (_, now) => now.date.endsWith("-01"), condition: bodyMonthDue, send: sendBodyMonth },
+  // One suggestion a week at most, and a slot that was offered or turned down rests four weeks (adapt.ts).
+  { kind: "body_adapt", slot: (p) => (p.body_nudges ? BODY_ADAPT_AT : null), windowMin: 15, cadence: (_, now) => now.weekday === 1, condition: adaptDue, send: sendAdapt },
 ];
 
 /** Kinds due for this user at `now`; the window never wraps past midnight, so a local date never repeats a kind. */

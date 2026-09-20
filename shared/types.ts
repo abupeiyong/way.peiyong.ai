@@ -66,6 +66,8 @@ export interface TelegramPrefs {
   lunch_at: string | null;
   dinner_at: string | null;
   workout_at: string | null;
+  /** The monthly body report on the 1st (PRD-body §13 item 11); null = off. */
+  body_month_at: string | null;
   /** 0/1: the conditional body nudge at 12:00 (PRD-body §6.2). */
   body_nudges: number;
 }
@@ -296,6 +298,31 @@ export interface BodySummary {
     kcal_avg: number | null;
     meals_logged: number;
   };
+}
+
+/**
+ * One calendar month of body logs (PRD-body §13 item 11), deterministic like BodySummary: the trend at
+ * each end of the month, what was logged in it, and the week that moved most toward the target.
+ */
+export interface BodyMonthReport {
+  /** YYYY-MM. */
+  month: string;
+  /** First and last day of the month that the report covers (the last is capped at today). */
+  from: string;
+  to: string;
+  /** The 7-day trend at each end of the window; null when there were too few weigh-ins. */
+  start_trend: number | null;
+  end_trend: number | null;
+  /** end_trend − start_trend; null when either is missing. */
+  change_kg: number | null;
+  weigh_ins: number;
+  workouts: number;
+  minutes: number;
+  /** Average kcal over the days that have a logged meal with calories; null when none do. */
+  kcal_avg: number | null;
+  meals_logged: number;
+  /** The month's best week: the one whose trend moved furthest toward the target. */
+  best_week: { week_start: string; change_kg: number; workouts: number } | null;
 }
 
 /** A change the Guide proposes; applied only after the user approves. */

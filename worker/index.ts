@@ -20,7 +20,7 @@ import { runSchedules, isDisconnected, localDate, DISCONNECTED_UNTIL } from "./t
 import { ALLOWED_UPDATES, BOT_COMMANDS, sendReply, TelegramApiError, TelegramBot } from "./telegram/api.ts";
 import { describeBrowser, loginUrl, pollLogin, startLoginRequest, LOGIN_TTL_SECONDS } from "./telegram/login.ts";
 import { telegramStats } from "./telegram/events.ts";
-import { bodySummary, detachBodyPlan, latestWeight, loadBodyPlan, loadMealLogs, loadWeightLogs, loadWorkoutLogs, refreshBodyGoalProgress, saveBodyPlan, suggestedWeightGoal, weightTrends } from "./body.ts";
+import { bodyMonthReport, bodySummary, detachBodyPlan, latestWeight, loadBodyPlan, loadMealLogs, loadWeightLogs, loadWorkoutLogs, refreshBodyGoalProgress, saveBodyPlan, suggestedWeightGoal, weightTrends } from "./body.ts";
 import { MAX_WORKOUT_MIN } from "./telegram/workout.ts";
 import { d1StateStore } from "./telegram/state.ts";
 import { userToday } from "./telegram/time.ts";
@@ -345,6 +345,7 @@ app.get("/api/telegram", async (c) => {
       lunch_at: prefs?.lunch_at ?? null,
       dinner_at: prefs?.dinner_at ?? null,
       workout_at: prefs?.workout_at ?? null,
+      body_month_at: prefs?.body_month_at ?? null,
       body_nudges: prefs?.body_nudges ? 1 : 0,
     },
   };
@@ -876,11 +877,13 @@ app.get("/api/body", async (c) => {
   const userId = c.get("userId");
   const today = await todayFor(c.env.DB, userId);
   const from = addDays(today, -(BODY_LOG_DAYS - 1));
-  const [summary, weights, meals, workouts] = await Promise.all([
+  const [summary, weights, meals, workouts, month] = await Promise.all([
     bodySummary(c.env.DB, userId, today),
     loadWeightLogs(c.env.DB, userId, from),
     loadMealLogs(c.env.DB, userId, from),
     loadWorkoutLogs(c.env.DB, userId, from),
+    // The month so far (PRD-body §13 item 11): the same report the bot sends on the 1st.
+    bodyMonthReport(c.env.DB, userId, today, today),
   ]);
   const trend = await weightTrends(c.env.DB, userId, weights.map((w) => w.date));
   return c.json({
@@ -891,6 +894,7 @@ app.get("/api/body", async (c) => {
     trend,
     meals,
     workouts,
+    month,
     suggested: summary ? null : await suggestedWeightGoal(c.env.DB, userId),
   });
 });
