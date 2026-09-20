@@ -8,6 +8,7 @@
 //   /week         this week's plan (weekly.ts)   /goals   goals.ts        /review [daily|weekly]
 //   /note <text>  append to today's reflection   /guide <text>            /find <text>
 //   /body         the weight goal's numbers: trend, rate, projected date, verdict (body.ts)
+//   /meal [早|午|晚|加餐] <text>  log a meal by text; with no text, the ask with [跳过] [没吃] (meal.ts)
 //   /workout <activity> <minutes> [intensity]  log a workout; with no args, the activity buttons (workout.ts)
 //   /timezone /settings /mute /unlink            account.ts
 //   /help         this list
@@ -27,6 +28,7 @@ import type { Reply, TgMessage } from "./router.ts";
 import { parseTaskInput } from "./taskparse.ts";
 import { askTopThree } from "./topthree.ts";
 import { weekCommand } from "./weekly.ts";
+import { mealCommand } from "./meal.ts";
 import { workoutCommand } from "./workout.ts";
 
 export const HELP: Reply = {
@@ -41,6 +43,7 @@ export const HELP: Reply = {
     "/week  本周计划 · This week",
     "/goals  目标进度 · Goals",
     "/body  体重趋势和预计达成日 · Weight trend and projection",
+    "/meal 牛肉面  记一餐 · Log a meal（/meal 午 牛肉面）",
     "/workout 跑步 30  记一次运动 · Log a workout",
     "/review  今日复盘 · Review the day（/review weekly 周复盘）",
     "/note 一句话  记进今天的反思 · Add to today's reflection",
@@ -75,6 +78,7 @@ export async function handleCommand(ctx: CommandContext, name: string, args: str
     case "week": await weekCommand(ctx); break;
     case "goals": await goalsCommand(ctx); break;
     case "body": await bodyCommand(ctx); break;
+    case "meal": await mealCommand(ctx, args); break;
     case "workout": await workoutCommand(ctx, args); break;
     case "review": await startReview(ctx, /^w/i.test(args) ? "weekly" : "daily"); return; // starts its own state
     case "note": await noteCommand(ctx, args); break;

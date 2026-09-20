@@ -6,7 +6,8 @@
 
 import { cb, parseCallback, type Callback } from "./callback.ts";
 import {
-  MEAL_CAPTION_RE, largestPhoto, mealKindAt, parseMealEstimate, parseMealNumbers, dishLine,
+  MEAL_CAPTION_RE, largestPhoto, mealKindAt, mealKindFromWord, parseMealEstimate, parseMealNumbers,
+  dishLine, splitMealArgs,
 } from "./meal.ts";
 
 function check(ok: boolean, what: string): void {
@@ -32,6 +33,15 @@ check(parseCallback("ml:7:q") === null, "an unknown meal action is refused");
 check(parseCallback("ml:0:y") === null, "meal id 0 is refused");
 check(parseCallback("ml:7") === null, "a meal id with no action is refused");
 
+parsesBackTo(cb.mealPrompt("skip", "lunch", "2026-09-20"),
+  { verb: "meal_prompt", action: "skip", meal: "lunch", date: "2026-09-20" }, "ml:s:<kind>:<date> round-trips");
+parsesBackTo(cb.mealPrompt("none", "breakfast", "2026-09-20"),
+  { verb: "meal_prompt", action: "none", meal: "breakfast", date: "2026-09-20" }, "ml:n:<kind>:<date> round-trips");
+parsesBackTo(cb.mealPrompt("skip", "snack", "2026-09-20"),
+  { verb: "meal_prompt", action: "skip", meal: "snack", date: "2026-09-20" }, "ml:s:s:<date> is a snack, not an id");
+check(parseCallback("ml:s:l:2026-13-40") === null, "a meal prompt with an impossible date is refused");
+check(parseCallback("ml:s:q:2026-09-20") === null, "an unknown meal code is refused");
+
 // ---------- which photos are meals (§5.2) ----------
 
 check(MEAL_CAPTION_RE.test("#meal"), "#meal makes a photo a meal");
@@ -43,7 +53,22 @@ check(!MEAL_CAPTION_RE.test(""), "a photo with no caption is not a meal on its o
 check(mealKindAt(8 * 60) === "breakfast", "08:00 is breakfast");
 check(mealKindAt(13 * 60) === "lunch", "13:00 is lunch");
 check(mealKindAt(19 * 60 + 30) === "dinner", "19:30 is dinner");
+check(mealKindAt(21 * 60 + 30) === "snack", "21:30 is a snack");
 check(mealKindAt(23 * 60) === "snack", "23:00 is a snack");
+
+// ---------- /meal [早|午|晚|加餐] <text> (§11) ----------
+
+check(mealKindFromWord("午") === "lunch" && mealKindFromWord("breakfast") === "breakfast", "the meal words map");
+check(mealKindFromWord("牛肉面") === null, "a dish is not a meal word");
+
+const lunchTime = 12 * 60 + 40;
+check(same(splitMealArgs("牛肉面", lunchTime), { kind: "lunch", text: "牛肉面" }), "/meal 牛肉面 at 12:40 is a lunch");
+check(same(splitMealArgs("晚 牛肉面", lunchTime), { kind: "dinner", text: "牛肉面" }), "the word wins over the clock");
+check(same(splitMealArgs("午饭牛肉面", 9 * 60), { kind: "lunch", text: "牛肉面" }), "the word may be written against the food");
+check(same(splitMealArgs("加餐", lunchTime), { kind: "snack", text: "" }), "a word on its own opens the ask");
+check(same(splitMealArgs("  ", 9 * 60), { kind: "breakfast", text: "" }), "no text at all opens the ask");
+check(same(splitMealArgs("两个包子 一杯豆浆", 9 * 60), { kind: "breakfast", text: "两个包子 一杯豆浆" }),
+  "a description with a space is not a meal word");
 
 check(largestPhoto(undefined) === null, "a message with no photo has no size to download");
 check(
