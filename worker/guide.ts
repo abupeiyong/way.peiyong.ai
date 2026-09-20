@@ -6,6 +6,7 @@ import type { BodySummary, GuideProposal } from "../shared/types.ts";
 import { asksAboutBody, bodyContextLine, bodySummary, bodyVerdictLine, suggestedWeightGoal } from "./body.ts";
 import { userToday } from "./telegram/time.ts";
 import { weekStartOf } from "./dates.ts";
+import { trackersContextLine } from "./streams.ts";
 
 export interface GuideEnv {
   AI?: Ai;
@@ -32,6 +33,8 @@ You NEVER change data yourself. When a change would help, append a fenced block 
   {"kind":"log_workout","date":"YYYY-MM-DD","activity":"run","minutes":30,"intensity":"easy|moderate|hard?"}
   {"kind":"log_weight","date":"YYYY-MM-DD","kg":72.4}
 Keep proposals few and high-leverage. The user approves or ignores them.
+
+Trackers: when the user says they want to track, record or build a habit around something the \`Trackers:\` context line does not already list, propose exactly one \`create_tracker\`. Pick the shape from what is measured — \`duration\` for time spent (always stored in minutes), \`count\` for how many times, \`number\` for a measured value with a unit, \`bool\` for did-it-or-not, \`money\` for spending. Put the user's own words in \`aliases\` (two to four, short) so they can log by typing naturally; never write a regular expression. Set \`ask_at\` to a local HH:MM when being asked would help, and \`quick\` to two or three plausible one-tap answers in the base unit. Add a \`goal\` only when the user named a target: \`accumulate\` with a per-period amount ("10 hours a week" becomes target 600, period week, because duration is minutes), or \`reach\` with a value to arrive at. One tracker at a time, never several.
 
 Body: when the context has a \`Body:\` line, it holds every number about the weight goal — the 7-day trend, the weekly rate, what is left, the projected date and the verdict. Quote those; never fit, extrapolate or invent a projection of your own, and when the line says n/a say the weigh-ins are not enough yet. Propose \`set_body_plan\` only when the line says there is no plan, \`log_weight\` when the user reports a weight ("I was 72.4 this morning"), and \`log_workout\` when they describe training they did. Never propose a meal: meals come from the user or a photo, not from prose.
 
@@ -117,6 +120,7 @@ export async function guideState(db: D1Database, userId: number): Promise<{ cont
   const body = await bodySummary(db, userId, today);
   const suggested = body ? null : await suggestedWeightGoal(db, userId);
 
+  const trackerLine = await trackersContextLine(db, userId, today);
   const lines = [
     `Today: ${today}`,
     `User: ${user?.name ?? ""}`,
@@ -127,6 +131,7 @@ export async function guideState(db: D1Database, userId: number): Promise<{ cont
     `This week's plan: ${plan ? `${plan.theme || "(no theme)"} — ${[plan.outcome1, plan.outcome2, plan.outcome3].filter(Boolean).join("; ")}` : "(none)"}`,
     `Today's intention: ${day?.intention || "(none)"}`,
     `Today's top three: ${day ? [day.top1, day.top2, day.top3].filter(Boolean).join("; ") || "(empty)" : "(empty)"}`,
+    trackerLine,
     `Today's tasks: ${tasks.length ? tasks.map((t) => `${t.title}${t.done ? " ✓" : ""}`).join("; ") : "(none)"}`,
     ...(body ? [`Body: ${bodyContextLine(body)}`] : []),
     ...(suggested ? [`Body: no plan (goal "${suggested}" looks like a weight goal)`] : []),

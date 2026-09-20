@@ -20,6 +20,10 @@ import { runSchedules, isDisconnected, localDate, DISCONNECTED_UNTIL } from "./t
 import { ALLOWED_UPDATES, BOT_COMMANDS, sendReply, TelegramApiError, TelegramBot } from "./telegram/api.ts";
 import { describeBrowser, loginUrl, pollLogin, startLoginRequest, LOGIN_TTL_SECONDS } from "./telegram/login.ts";
 import { telegramStats } from "./telegram/events.ts";
+import {
+  deleteObservation, logObservation, provisionTracker, retireStream, streamById, tracker, trackers, updateStream,
+} from "./streams.ts";
+import { parseShape } from "./telegram/parse.ts";
 import { bodyMonthReport, bodySummary, detachBodyPlan, latestWeight, loadBodyPlan, loadMealLogs, loadWeightLogs, loadWorkoutLogs, refreshBodyGoalProgress, saveBodyPlan, suggestedWeightGoal, weightTrends } from "./body.ts";
 import { MAX_WORKOUT_MIN } from "./telegram/workout.ts";
 import { d1StateStore } from "./telegram/state.ts";
@@ -1037,6 +1041,59 @@ app.put("/api/body/plan", async (c) => {
 app.delete("/api/body/plan", async (c) => {
   await detachBodyPlan(c.env.DB, c.get("userId"));
   return c.json({ ok: true });
+});
+
+// ---------- trackers (docs/PRD-brain.md §14) ----------
+// The dashboard the conversation provisions: every card is generated from the stream's shape and its
+// goal's kind, so a new kind of tracker needs no new endpoint and no per-user code.
+
+app.get("/api/tracks", async (c) => {
+  const userId = c.get("userId");
+  const today = await todayFor(c.env.DB, userId);
+  return c.json({ today, trackers: await trackers(c.env.DB, userId, today, true) });
+});
+
+app.post("/api/tracks", async (c) => {
+  const userId = c.get("userId");
+  const b = await c.req.json<Record<string, unknown>>();
+  const r = await provisionTracker(c.env.DB, userId, b as never, await todayFor(c.env.DB, userId));
+  if (!r.ok) return c.json({ error: r.error }, r.status);
+  return c.json({ stream: r.stream, goal_id: r.goalId });
+});
+
+app.put("/api/tracks/:id", async (c) => {
+  const userId = c.get("userId");
+  const id = Number(c.req.param("id"));
+  const stream = await updateStream(c.env.DB, userId, id, await c.req.json<Record<string, unknown>>());
+  if (!stream) return c.json({ error: "no such tracker" }, 404);
+  return c.json({ stream });
+});
+
+app.delete("/api/tracks/:id", async (c) => {
+  const ok = await retireStream(c.env.DB, c.get("userId"), Number(c.req.param("id")));
+  return ok ? c.json({ ok: true }) : c.json({ error: "no such tracker" }, 404);
+});
+
+/** Manual entry from the web. The value is parsed by the stream's own shape parser, as in the chat. */
+app.post("/api/tracks/:id/log", async (c) => {
+  const userId = c.get("userId");
+  const stream = await streamById(c.env.DB, userId, Number(c.req.param("id")));
+  if (!stream) return c.json({ error: "no such tracker" }, 404);
+  const b = await c.req.json<{ date?: string; value?: unknown; note?: string }>();
+  const date = assertDate(b.date ?? await todayFor(c.env.DB, userId));
+  const parsed = parseShape(stream.shape, String(b.value ?? ""), stream.unit);
+  if (!parsed) return c.json({ error: `could not read that as a ${stream.shape}` }, 400);
+  const r = await logObservation(c.env.DB, userId, stream, {
+    at: date, num: parsed.num, text: parsed.text ?? null, source: "web", note: String(b.note ?? ""),
+  });
+  if (!r.ok) return c.json({ error: r.error }, 400);
+  return c.json({ ok: true, id: r.id, num: r.num });
+});
+
+app.delete("/api/tracks/obs/:id", async (c) => {
+  const userId = c.get("userId");
+  const ok = await deleteObservation(c.env.DB, userId, Number(c.req.param("id")), await todayFor(c.env.DB, userId));
+  return ok ? c.json({ ok: true }) : c.json({ error: "no such observation" }, 404);
 });
 
 // ---------- guide ----------

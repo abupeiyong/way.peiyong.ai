@@ -44,6 +44,10 @@ npx wrangler secret put OPENAI_API_KEY --name way   # 可选,升级 Guide 模型
   proposals 审批(create_goal / create_task / set_top_three)
 - Settings: 资料、时区、Direction、life areas 编辑(颜色/满意度/归档/新增)、Telegram 连接与各提醒时间、
   安全(关闭密码登录)、退出登录
+- Tracks（通用追踪层，`docs/PRD-brain.md`）: 跟道引说「我想每周读书 10 小时」，它提议一个追踪器，点同意即生效——
+  不改代码。六种 shape（number/duration/count/bool/money/text）× 七种 goal kind（P0 实现 reach/accumulate），
+  一张 `observations` 表；`/log 读书 45`、「今天读书 45 分钟」、`/timer 读书 … /stop` 计时、定时询问带一键作答，
+  全部不经模型；网页 `/tracks` 的卡片按 shape 和 goal kind 生成
 - Telegram（共享 bot，`docs/PRD-telegram.md`）: 网页扫码/深链绑定；Login Widget / 6 位验证码 / 深链确认三种登录；
   每天晨报+三件事一条消息、21:30 复盘状态机、周一周计划、周日周复盘、中午提醒、时间块提醒、月初领域打分；
   /today /plan /task(明天 … @目标 #30m !must) /done /inbox /week /goals /review /note /guide /find /timezone /settings /mute /unlink；

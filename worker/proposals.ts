@@ -5,6 +5,7 @@ import type { GoalLevel, GuideProposal, ReviewPeriod, WorkoutIntensity } from ".
 import { DAILY_KCAL_RANGE, DEFAULT_WEEKLY_WORKOUTS, KG_RANGE, WEEKLY_WORKOUTS_RANGE, type WeightSource } from "../shared/body.ts";
 import { refreshBodyGoalProgress, saveBodyPlan } from "./body.ts";
 import { reviewPeriodStart, weekStartOf } from "./dates.ts";
+import { provisionTracker } from "./streams.ts";
 import { userToday } from "./telegram/time.ts";
 
 const GOAL_LEVELS: GoalLevel[] = ["lifetime", "year", "quarter", "month", "week"];
@@ -12,8 +13,11 @@ const REVIEW_PERIODS: ReviewPeriod[] = ["daily", "weekly", "monthly", "quarterly
 
 export type ApplyResult =
   | { ok: true; applied: string }
-  /** 400 = the proposal itself is malformed; 404 = it names something the user does not have. */
-  | { ok: false; status: 400 | 404; error: string };
+  /**
+   * 400 = the proposal itself is malformed; 404 = it names something the user does not have;
+   * 409 = it collides with something they already have (a tracker name or one of its words).
+   */
+  | { ok: false; status: 400 | 404 | 409; error: string };
 
 const isDate = (s: unknown): s is string => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
 
@@ -208,6 +212,19 @@ export async function applyProposal(
       "INSERT INTO workout_logs (user_id, date, activity, minutes, intensity, note) VALUES (?, ?, ?, ?, ?, ?)"
     ).bind(userId, proposal.date, activity.slice(0, 60), minutes, proposal.intensity ?? null, String(proposal.note ?? "")).run();
     return { ok: true, applied: "workout" };
+  }
+
+  if (proposal.kind === "create_tracker") {
+    // Every field the model supplies is validated in provisionTracker, including the alias conflicts
+    // that would make two trackers fight over the same message (PRD-brain §8.3).
+    const r = await provisionTracker(db, userId, {
+      name: proposal.name, shape: proposal.shape, unit: proposal.unit ?? null,
+      min_value: proposal.min_value ?? null, max_value: proposal.max_value ?? null,
+      aliases: proposal.aliases ?? [], ask_at: proposal.ask_at ?? null, ask_text: proposal.ask_text ?? null,
+      quick: proposal.quick ?? [], goal: proposal.goal ?? null,
+    }, await todayOf(db, userId));
+    if (!r.ok) return { ok: false, status: r.status, error: r.error };
+    return { ok: true, applied: "tracker" };
   }
 
   return { ok: false, status: 400, error: "unknown proposal kind" };

@@ -1,3 +1,4 @@
+import type { GoalKind, Period, Shape, Verdict } from "./streams.ts";
 import type { WeightSource } from "./body.ts";
 
 export type GoalLevel = "lifetime" | "year" | "quarter" | "month" | "week";
@@ -19,6 +20,58 @@ export interface User {
   password_login_disabled: boolean;
   /** Created from Telegram with no email: `email` is "" and password sign-in is off from birth. */
   telegram_only?: boolean;
+}
+
+/** A streams row as the API returns it (docs/PRD-brain.md §6). */
+export interface StreamRow {
+  id: number;
+  name: string;
+  shape: Shape;
+  unit: string | null;
+  min_value: number | null;
+  max_value: number | null;
+  aliases: string[];
+  bare_value_capture: number;
+  ask_at: string | null;
+  ask_text: string | null;
+  quick: number[];
+  status: string;
+}
+
+/** The goal that judges a stream, when it has one. */
+export interface TrackerGoal {
+  id: number;
+  title: string;
+  kind: GoalKind;
+  target: number;
+  period: Period | null;
+  deadline: string | null;
+  start: number | null;
+}
+
+/** Everything worker/derive.ts can say about a tracker's goal. The model never computes any of it (§4 R2). */
+export interface TrackerStatus {
+  verdict: Verdict;
+  progress: number | null;
+  current: number | null;
+  expected?: number | null;
+  trend?: number | null;
+  rate?: number | null;
+  remaining?: number | null;
+  projected_date?: string | null;
+  period_start?: string;
+  period_end?: string;
+  days_left?: number;
+}
+
+/** One card on the generated dashboard — GET /api/tracks. */
+export interface Tracker {
+  stream: StreamRow;
+  goal: TrackerGoal | null;
+  status: TrackerStatus | null;
+  today_total: number;
+  latest: { at: string; num: number | null; text: string | null } | null;
+  observations?: { at: string; num: number | null; text: string | null }[];
 }
 
 /** A telegram_accounts row: the Telegram identity linked to one Way account. */
@@ -337,7 +390,24 @@ export type GuideProposal =
   | { kind: "create_review"; period: ReviewPeriod; period_start: string; answers: Record<string, string> }
   | { kind: "set_body_plan"; goal_title: string; start_kg: number; target_kg: number; weekly_workouts?: number; daily_kcal?: number | null }
   | { kind: "log_workout"; date: string; activity: string; minutes: number; intensity?: WorkoutIntensity; note?: string }
-  | { kind: "log_weight"; date: string; kg: number; note?: string };
+  | { kind: "log_weight"; date: string; kg: number; note?: string }
+  /** Provision a tracker (docs/PRD-brain.md §12): a stream, and optionally the goal that judges it. */
+  | {
+      kind: "create_tracker";
+      name: string;
+      shape: Shape;
+      unit?: string | null;
+      /** The user's own words for it; the capture pattern is built from these, in code. */
+      aliases?: string[];
+      min_value?: number | null;
+      max_value?: number | null;
+      /** Local HH:MM to ask at, or null for a tracker the user logs unprompted. */
+      ask_at?: string | null;
+      ask_text?: string | null;
+      /** One-tap answers on the ask, in the stream's base unit. */
+      quick?: number[];
+      goal?: { kind: GoalKind; target: number; period?: Period | null; title?: string; deadline?: string | null } | null;
+    };
 
 export interface GuideMessage {
   id: number;
