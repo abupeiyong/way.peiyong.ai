@@ -30,6 +30,7 @@ import { interruptReview, startReview } from "./review.ts";
 import type { Reply, TgMessage } from "./router.ts";
 import { parseTaskInput } from "./taskparse.ts";
 import { askTopThree } from "./topthree.ts";
+import { logCommand, timerStart, timerStop, tracksCommand } from "./stream.ts";
 import { weekCommand } from "./weekly.ts";
 import { mealCommand } from "./meal.ts";
 import { workoutCommand } from "./workout.ts";
@@ -52,6 +53,9 @@ export const HELP: Reply = {
     "/review  今日复盘 · Review the day（/review weekly 周复盘）",
     "/note 一句话  记进今天的反思 · Add to today's reflection",
     "/guide 问题  问道引 · Ask the Guide",
+    "/tracks  我的追踪 · My trackers",
+    "/log 读书 45  记一笔 · Log a value",
+    "/timer 读书 … /stop  计时 · Time something（也认 /开始 /停止）",
     "/find 关键词  查找 · Find tasks and goals",
     "/timezone /settings /mute /unlink",
     "",
@@ -89,6 +93,11 @@ export async function handleCommand(ctx: CommandContext, name: string, args: str
     case "note": await noteCommand(ctx, args); break;
     case "guide": await guideCommand(ctx, args); break;
     case "find": await findCommand(ctx, args); break;
+    case "tracks": case "track": await tracksCommand(ctx); break;
+    case "log": await logCommand(ctx, args); break;
+    // Not "start": that is Telegram's own deep-link command, handled above.
+    case "timer": case "开始": case "计时": await timerStart(ctx, args); break;
+    case "stop": case "停止": await timerStop(ctx); break;
     case "timezone": case "tz": await timezoneCommand(ctx, args); return; // may open its own state
     case "settings": await settingsCommand(ctx); break;
     case "mute": await muteCommand(ctx, args); break;

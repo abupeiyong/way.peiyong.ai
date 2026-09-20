@@ -3,7 +3,8 @@
 //   2. command (/…)                → command table
 //   3. pending telegram_state      → that state machine (e.g. an evening review in progress)
 //   4. reply to a Guide message    → Guide, with the thread as context
-//   5. anything else               → capture to the inbox: one round trip, no model call
+//   5. a registered capture pattern → log it to that tracker; still no model (PRD-brain §8.3)
+//   6. anything else               → capture to the inbox: one round trip, no model call
 // A photo is decided before any of that (PRD-body §5.2): while a meal ask is open, or captioned #meal / 饭,
 // it is a meal; every other photo falls through to the steps below as it always did.
 // The webhook (#6) verifies the update, resolves the Way user once and supplies the
@@ -107,7 +108,9 @@ export interface RouteHandlers {
   pendingState(message: TgMessage, text: string): Promise<boolean>;
   /** 4. Continue the Guide thread if `message.reply_to_message` is a Guide message. Returns false otherwise. */
   guideReply(message: TgMessage, text: string): Promise<boolean>;
-  /** 5. The default. A forwarded message arrives here too (message.forward_origin says where from). */
+  /** 5. A registered capture pattern: the message names a tracker and carries a value (PRD-brain §8.3). */
+  match(message: TgMessage, text: string): Promise<boolean>;
+  /** 6. The default. A forwarded message arrives here too (message.forward_origin says where from). */
   capture(message: TgMessage, text: string): Promise<void>;
   /** A voice message: transcribe, then capture. */
   voice(message: TgMessage): Promise<void>;
@@ -121,9 +124,11 @@ export interface RouteHandlers {
   unsupported(message: TgMessage): Promise<void>;
 }
 
-export type RouteKind = "callback" | "inline" | "chosen" | "command" | "state" | "guide" | "capture" | "voice" | "photo" | "unsupported" | "ignored";
+export type RouteKind = "callback" | "inline" | "chosen" | "command" | "state" | "guide" | "match" | "capture" | "voice" | "photo" | "unsupported" | "ignored";
 
-const COMMAND = /^\/([A-Za-z0-9_]{1,32})(?:@[A-Za-z0-9_]+)?(?:\s+([\s\S]*))?$/;
+// Telegram's own / menu is ASCII, but a user may type a command in their own language
+// (/开始, /停止) and it should work, so the name accepts any letter.
+const COMMAND = /^\/([\p{L}\p{N}_]{1,32})(?:@[A-Za-z0-9_]+)?(?:\s+([\s\S]*))?$/u;
 
 export function parseCommand(text: string): { name: string; args: string } | null {
   const m = COMMAND.exec(text.trim());
@@ -163,6 +168,7 @@ export async function routeUpdate(update: TgUpdate, h: RouteHandlers): Promise<R
   }
   if (await h.pendingState(message, text)) return "state";
   if (message.reply_to_message && (await h.guideReply(message, text))) return "guide";
+  if (await h.match(message, text)) return "match";
   await h.capture(message, text);
   return "capture";
 }

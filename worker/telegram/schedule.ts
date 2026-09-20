@@ -34,6 +34,7 @@
 
 import { sendReply, sendReplyId, TelegramApiError, TelegramBot } from "./api.ts";
 import { runBlockReminders } from "./blocks.ts";
+import { dueAsks, sendStreamAsk } from "./stream.ts";
 import { bodyNudgeDue, sendBodyNudge } from "./bodynudge.ts";
 import { bodyMonthDue, sendBodyMonth } from "./bodymonth.ts";
 import { adaptDue, sendAdapt } from "./adapt.ts";
@@ -69,6 +70,8 @@ const MAX_PARTIAL_BACKOFF_MS = 60_000;
 export const DISCONNECTED_UNTIL = "9999-12-31 23:59:59";
 /** The midday nudge's fixed slot (PRD §6 row 5). */
 const NUDGE_AT = "11:00";
+/** Minutes after a tracker's ask time during which a tick still delivers it. */
+const STREAM_ASK_WINDOW_MIN = 15;
 /** The body nudge's fixed slot (PRD-body §6.2): the rules are checked at noon. */
 const BODY_NUDGE_AT = "12:00";
 /** The adaptive-time suggestion's fixed slot (PRD-body §13): once a week, after Monday's plan. */
@@ -272,6 +275,16 @@ async function runUser(env: ScheduleEnv, bot: TelegramBot, u: Candidate, at: Dat
     if (k.condition && !(await k.condition(ctx))) continue;
     if (!(await claim(db, u.user_id, k.kind, now.date))) continue;
     if (!(await attempt(k.kind, () => k.send(ctx)))) return;
+  }
+
+  // Each tracker carries its own ask time, so they are claimed per stream rather than as one kind
+  // (PRD-brain §6); the condition — nothing logged today — lives in dueAsks.
+  if (!inQuietHours(u.quiet_from, u.quiet_to, now.minutes)) {
+    for (const stream of await dueAsks(db, u.user_id, now.minutes, STREAM_ASK_WINDOW_MIN, now.date)) {
+      const kind = `stream:${stream.id}`;
+      if (!(await claim(db, u.user_id, kind, now.date))) continue;
+      if (!(await attempt(kind, () => sendStreamAsk(ctx, stream)))) return;
+    }
   }
 
   if (u.block_reminders && !inQuietHours(u.quiet_from, u.quiet_to, now.minutes)) {

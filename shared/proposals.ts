@@ -37,6 +37,12 @@ export function proposalLabel(p: GuideProposal): LabelPart[] {
     const answered = Object.values(p.answers ?? {}).filter(Boolean).length;
     return [`${p.period} review from ${p.period_start}: `, { strong: `${answered} answer${answered === 1 ? "" : "s"}` }];
   }
+  if (p.kind === "create_tracker") {
+    const goal = p.goal
+      ? ` · ${p.goal.kind === "accumulate" ? `${p.goal.target}${p.unit ?? ""} per ${p.goal.period ?? "week"}` : `to ${p.goal.target}${p.unit ?? ""}`}`
+      : "";
+    return ["Track ", { strong: p.name }, `${p.ask_at ? ` · ask at ${p.ask_at}` : ""}${goal}`];
+  }
   return ["Unknown proposal"];
 }
 

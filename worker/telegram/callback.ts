@@ -16,6 +16,7 @@ import { weeklyGuideDraft, weeklyWritePrompt } from "./weekly.ts";
 import { blockDone, blockSnooze, blockTomorrow, recordActualMin } from "./blocks.ts";
 import { checkinDone, checkinList, checkinPick, checkinRate } from "./checkin.ts";
 import { loginDecide } from "./login.ts";
+import { obsUndoButton, streamSkipButton, streamValueButton, timerStartButton, timerStopButton, trackerShowButton } from "./stream.ts";
 import { directionSkip, timezonePick } from "./register.ts";
 import { muteFor, settingsToggle, unlinkConfirm } from "./account.ts";
 import { proposalAnswer, taskAskGuide } from "./guide.ts";
@@ -117,6 +118,13 @@ type DirectionSkip = "dr:s";
 type ProposalAnswer<MsgId extends Num, Idx extends Num> = `pr:${MsgId}:${Idx}:${"y" | "n"}`;
 /** "Send me today's brief" on the link welcome (link.ts). */
 type Brief = "br";
+/** Trackers (PRD-brain §8): a one-tap answer, a skip, an undo, the timer and the card. */
+type StreamValue<Id extends Num, N extends Num> = `sv:${Id}:${N}`;
+type StreamSkip<Id extends Num> = `sv:${Id}:x`;
+type ObsUndo<Id extends Num> = `su:${Id}`;
+type TimerStart<Id extends Num> = `tm:${Id}`;
+type TimerStop = "tm:x";
+type TrackerShow<Id extends Num> = `tr:${Id}`;
 type BodyNudge = `bn:${(typeof BODY_NUDGE_CODES)[BodyNudgeRule]}`;
 type BodyActionData = `bd:${(typeof BODY_ACTION_CODES)[BodyAction]}`;
 type WeightData<Date extends string> = `wt:${(typeof WEIGHT_CODES)[WeightAction]}:${Date}`;
@@ -169,12 +177,20 @@ export type Callback =
   | { verb: "meal"; mealId: number; action: MealAction }
   | { verb: "meal_prompt"; action: MealPromptAction; meal: MealKind; date: string }
   /** slot and time are null on `ad:x` — the suggestion was turned down. */
-  | { verb: "adapt"; slot: AdaptSlot | null; time: string | null };
+  | { verb: "adapt"; slot: AdaptSlot | null; time: string | null }
+  | { verb: "stream_value"; streamId: number; value: number }
+  | { verb: "stream_skip"; streamId: number }
+  | { verb: "obs_undo"; obsId: number }
+  | { verb: "timer_start"; streamId: number }
+  | { verb: "timer_stop" }
+  | { verb: "tracker_show"; streamId: number };
 
 // Numeric bounds; the build-time assertion below is checked against their widest values.
 const MAX_OFFSET_DAYS = 365;
 const MAX_ACTUAL_MIN = 1440;
 const MAX_PROPOSAL_IDX = 99;
+/** A quick-answer button carries a small whole number in the stream's base unit. */
+const MAX_QUICK_VALUE = 9999;
 
 // Build-time assertion: the widest payload of every verb fits in 64 bytes (all ASCII,
 // so characters = bytes). Changing a format to something longer fails `npm run typecheck`.
@@ -187,7 +203,8 @@ type Widest =
   | Block<MaxId> | Checkin<MaxId, "10"> | Login<MaxId> | Register | TimezonePick<"30"> | Settings | Mute | Unlink
   | DirectionSkip | ProposalAnswer<MaxId, "99"> | Brief | BodyNudge | BodyActionData
   | WeightData<"2026-12-31"> | WorkoutPickData | WorkoutFromTask<MaxId, "600"> | Meal<MaxId> | MealPrompt<"2026-12-31">
-  | Adapt<"2359">;
+  | Adapt<"2359"> | StreamValue<MaxId, "9999"> | StreamSkip<MaxId> | ObsUndo<MaxId>
+  | TimerStart<MaxId> | TimerStop | TrackerShow<MaxId>;
 type Budget<N extends number, T extends 0[] = []> = T["length"] extends N ? T : Budget<N, [...T, 0]>;
 type Fits<S extends string, B extends 0[]> = S extends `${infer _}${infer Rest}`
   ? B extends [0, ...infer Left extends 0[]] ? Fits<Rest, Left> : false
@@ -355,6 +372,26 @@ export function parseCallback(data: string): Callback | null {
       const mealId = toId(p[1]), action = codeOf<MealAction>(MEAL_CODES, p[2]);
       return p.length === 3 && mealId !== null && action ? { verb: "meal", mealId, action } : null;
     }
+    case "sv": {
+      const streamId = toId(p[1]);
+      if (p.length !== 3 || streamId === null) return null;
+      if (p[2] === "x") return { verb: "stream_skip", streamId };
+      const value = toInt(p[2], 0, MAX_QUICK_VALUE);
+      return value === null ? null : { verb: "stream_value", streamId, value };
+    }
+    case "su": {
+      const obsId = toId(p[1]);
+      return p.length === 2 && obsId !== null ? { verb: "obs_undo", obsId } : null;
+    }
+    case "tm": {
+      if (p.length === 2 && p[1] === "x") return { verb: "timer_stop" };
+      const streamId = toId(p[1]);
+      return p.length === 2 && streamId !== null ? { verb: "timer_start", streamId } : null;
+    }
+    case "tr": {
+      const streamId = toId(p[1]);
+      return p.length === 2 && streamId !== null ? { verb: "tracker_show", streamId } : null;
+    }
     case "ad": {
       if (p.length === 2 && p[1] === "x") return { verb: "adapt", slot: null, time: null };
       const slot = codeOf<AdaptSlot>(ADAPT_CODES, p[1]);
@@ -425,6 +462,12 @@ export const cb = {
   adapt: (slot: AdaptSlot, time: string): Adapt<string> =>
     checked(`ad:${ADAPT_CODES[slot]}:${time.replace(":", "")}` as const),
   adaptKeep: (): "ad:x" => checked("ad:x"),
+  streamValue: (streamId: number, value: number): StreamValue<number, number> => checked(`sv:${streamId}:${value}` as const),
+  streamSkip: (streamId: number): StreamSkip<number> => checked(`sv:${streamId}:x` as const),
+  obsUndo: (obsId: number): ObsUndo<number> => checked(`su:${obsId}` as const),
+  timerStart: (streamId: number): TimerStart<number> => checked(`tm:${streamId}` as const),
+  timerStop: (): TimerStop => checked("tm:x"),
+  trackerShow: (streamId: number): TrackerShow<number> => checked(`tr:${streamId}` as const),
 };
 
 // ---------- handlers ----------
@@ -520,6 +563,12 @@ async function dispatch(ctx: CallbackContext, p: Callback): Promise<string | und
     case "meal": return mealButton(ctx, p.mealId, p.action);
     case "meal_prompt": return mealPromptButton(ctx, p.action, p.meal, p.date);
     case "adapt": return adaptButton(ctx, p.slot, p.time);
+    case "stream_value": return streamValueButton(ctx, p.streamId, p.value);
+    case "stream_skip": return streamSkipButton(ctx, p.streamId);
+    case "obs_undo": return obsUndoButton(ctx, p.obsId);
+    case "timer_start": return timerStartButton(ctx, p.streamId);
+    case "timer_stop": return timerStopButton(ctx);
+    case "tracker_show": return trackerShowButton(ctx, p.streamId);
   }
 }
 

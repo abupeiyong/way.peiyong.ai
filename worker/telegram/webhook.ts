@@ -35,6 +35,7 @@ import { mealAnswer, mealNumbersAnswer, mealPhoto } from "./meal.ts";
 import { localDate } from "./schedule.ts";
 import { d1StateStore } from "./state.ts";
 import { topThreeAnswer } from "./topthree.ts";
+import { streamAskAnswer, streamPatternMatch } from "./stream.ts";
 import { weightAnswer, weightFastPath } from "./weight.ts";
 import { workoutAnswer } from "./workout.ts";
 import { weeklyPlanAnswer } from "./weekly.ts";
@@ -193,14 +194,18 @@ async function dispatch(
     callback: (q) => handleCallback(ctx, q.data ?? ""),
     command: (name, args, message) => handleCommand(ctx, name, args, message),
     // Each state machine only takes its own kind, so the order only matters for who looks first.
+    // L1 (PRD-brain §8.1): each state machine takes only its own kind, so the order decides who looks first.
     pendingState: async (_message, text) =>
-      (await reviewAnswer(ctx, text)) || (await topThreeAnswer(ctx, text)) || (await weeklyPlanAnswer(ctx, text))
+      (await reviewAnswer(ctx, text)) || (await topThreeAnswer(ctx, text)) || (await streamAskAnswer(ctx, text))
+      || (await weeklyPlanAnswer(ctx, text))
       || (await weightAnswer(ctx, text)) || (await workoutAnswer(ctx, text)) || (await mealNumbersAnswer(ctx, text))
       || (await mealAnswer(ctx, text))
       || (await goalProgressAnswer(ctx, text))
       || (await timezoneAnswer(ctx, text))
       || (await onboardAnswer(ctx, text)),
     guideReply: (message, text) => guideReplyThread(ctx, message, text),
+    // L3 (PRD-brain §8.3): a message that names a tracker and carries a value logs without a model.
+    match: (_message, text) => streamPatternMatch(ctx, text),
     capture: async (message, text) => {
       // The weight fast path sits over capture, not over the steps above: with a body plan a bare number is
       // a weigh-in, and its [撤销，记进 Inbox] puts the text here after all (PRD-body §5.1).
