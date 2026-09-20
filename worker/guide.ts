@@ -12,6 +12,8 @@ export interface GuideEnv {
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL?: string;
   OPENAI_CHAT_MODEL?: string;
+  /** Set to turn meal photos into estimates through the OpenAI-compatible endpoint (PRD-body §5.3, meal.ts). */
+  OPENAI_VISION_MODEL?: string;
 }
 
 const SYSTEM_PROMPT = `You are Way Guide, the calm strategist inside Way, a personal life-planning system.

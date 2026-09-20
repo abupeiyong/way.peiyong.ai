@@ -34,6 +34,9 @@
     // 没配 key 时自动退回 Workers AI(免费,质量略低)
     "OPENAI_BASE_URL": "https://api.openai.com/v1",
     "OPENAI_CHAT_MODEL": "gpt-5-nano"
+    // 饭菜照片(PRD-body §5.3): 配上 OPENAI_VISION_MODEL 就走 OpenAI 兼容接口的图片输入;
+    // 不配时自动退回 Workers AI @cf/meta/llama-3.2-11b-vision-instruct。
+    // "OPENAI_VISION_MODEL": "gpt-5-nano"
   },
   "observability": { "enabled": true }
 }
