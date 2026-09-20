@@ -7,11 +7,8 @@
 // in a try/catch: on a database where 0004 has not run yet, a body-less account is the answer, not a 500.
 
 import type { BodyPlan, BodySummary, BodyVerdict, WeightLog } from "../shared/types.ts";
-import { BODY_VERDICT_TEXT } from "../shared/body.ts";
+import { BODY_VERDICT_TEXT, WEIGHT_GOAL_RE } from "../shared/body.ts";
 import { addDays, weekStartOf } from "./dates.ts";
-
-/** Goal titles that look like a weight goal (PRD-body §4.2) — used to offer a plan, never to create one. */
-export const WEIGHT_GOAL_RE = /体重|减肥|减重|增肌|瘦|weight|lose|gain|kg|lb/i;
 
 /** "能不能达成" and friends: the question that must be answered from the summary first (PRD-body §8.3). */
 const FEASIBILITY_RE = /能不能|能否|来得及|赶得上|达得到|达成|做得到|有没有希望|on track|make it|achievable|reach (it|the target)|going to (hit|reach)/i;
@@ -53,6 +50,58 @@ export async function suggestedWeightGoal(db: D1Database, userId: number): Promi
     "SELECT title FROM goals WHERE user_id = ? AND status IN ('active','at_risk') ORDER BY id"
   ).bind(userId).all<{ title: string }>();
   return results.find((g) => WEIGHT_GOAL_RE.test(g.title))?.title ?? null;
+}
+
+/** The most recent weigh-in, or null — the body-plan form's default start weight (PRD-body §4.1). */
+export async function latestWeight(db: D1Database, userId: number): Promise<WeightLog | null> {
+  try {
+    return await db.prepare("SELECT date, kg, source, note FROM weight_logs WHERE user_id = ? ORDER BY date DESC LIMIT 1")
+      .bind(userId).first<WeightLog>();
+  } catch {
+    return null; // migration 0004 has not run here
+  }
+}
+
+/** The Telegram slots the body prompts use, filled from the defaults when a plan is created (PRD-body §4.3, §6). */
+const BODY_PREF_DEFAULTS: [string, string][] = [
+  ["weigh_at", "07:00"], ["breakfast_at", "08:30"], ["lunch_at", "13:00"], ["dinner_at", "19:30"], ["workout_at", "20:30"],
+];
+
+/**
+ * Create the user's body plan, move it to another goal or change its numbers (PRD-body §4.1, §4.3).
+ * One row per user, so writing it on a second goal moves it — the caller asks first. Storage is kg;
+ * `input_unit` is a display hint and keeps its old value when the caller does not set one.
+ * Turning the plan on fills the NULL body slots and makes goals.progress derived from the weigh-ins.
+ */
+export async function saveBodyPlan(
+  db: D1Database,
+  userId: number,
+  plan: { goal_id: number; start_kg: number; target_kg: number; weekly_workouts: number; daily_kcal: number | null; input_unit?: string },
+  today: string
+): Promise<void> {
+  const unit = plan.input_unit ?? null;
+  await db.prepare(
+    `INSERT INTO body_plans (user_id, goal_id, start_kg, target_kg, weekly_workouts, daily_kcal, input_unit)
+     VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 'kg'))
+     ON CONFLICT (user_id) DO UPDATE SET
+       goal_id = excluded.goal_id, start_kg = excluded.start_kg, target_kg = excluded.target_kg,
+       weekly_workouts = excluded.weekly_workouts, daily_kcal = excluded.daily_kcal,
+       input_unit = COALESCE(?, body_plans.input_unit), updated_at = datetime('now')`
+  ).bind(userId, plan.goal_id, plan.start_kg, plan.target_kg, plan.weekly_workouts, plan.daily_kcal, unit, unit).run();
+  await db.prepare("INSERT OR IGNORE INTO telegram_prefs (user_id) VALUES (?)").bind(userId).run();
+  for (const [field, value] of BODY_PREF_DEFAULTS) {
+    await db.prepare(`UPDATE telegram_prefs SET ${field} = COALESCE(${field}, ?) WHERE user_id = ?`).bind(value, userId).run();
+  }
+  await refreshBodyGoalProgress(db, userId, today);
+}
+
+/** Detach the plan (PRD-body §4.3): every body prompt stops, the logs and goals.progress stay. */
+export async function detachBodyPlan(db: D1Database, userId: number): Promise<void> {
+  try {
+    await db.prepare("DELETE FROM body_plans WHERE user_id = ?").bind(userId).run();
+  } catch {
+    // migration 0004 has not run here: there was no plan to detach.
+  }
 }
 
 /** Least-squares slope of y over x; null when the points are degenerate. */

@@ -245,6 +245,9 @@ textarea.input { resize: vertical; min-height: 64px; }
 .chip.green { border-color: rgba(77, 112, 72, 0.5); color: #4d7048; background: rgba(77, 112, 72, 0.08); }
 .chip.amber { border-color: rgba(138, 106, 31, 0.45); color: var(--amber); background: var(--amber-bg); }
 .chip.red { border-color: rgba(168, 51, 42, 0.5); color: var(--red-deep); background: var(--red-tint); }
+/* the "track this as a weight goal" offer on a goal card (PRD-body §4.2) */
+.chip.offer { border-color: rgba(168, 51, 42, 0.35); color: var(--red-deep); background: var(--red-tint); }
+.chip.offer i { font-family: var(--serif-en); font-style: italic; opacity: 0.8; }
 
 .progress-track {
   height: 4px; border-radius: 999px;
@@ -298,6 +301,11 @@ textarea.input { resize: vertical; min-height: 64px; }
 }
 .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
 .modal-head h3 { font-family: var(--kai); font-size: 1.25rem; letter-spacing: 0.1em; }
+/* 身体计划 · Body plan, a section inside the goal modal (PRD-body §4.1) */
+.plan-block { border-top: 1px solid var(--line-soft); padding-top: 14px; }
+.plan-block .card-label { margin-bottom: 10px; }
+.plan-block .form-grid { margin-bottom: 2px; }
+
 .form-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
 .form-grid .wide { grid-column: 1 / -1; }
 .modal-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 20px; }

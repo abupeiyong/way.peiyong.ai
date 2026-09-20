@@ -2,8 +2,8 @@
 // so a tap and a click write the same rows. Nothing here runs without the user's approval.
 
 import type { GoalLevel, GuideProposal, ReviewPeriod, WorkoutIntensity } from "../shared/types.ts";
-import { KG_RANGE } from "../shared/body.ts";
-import { refreshBodyGoalProgress } from "./body.ts";
+import { DAILY_KCAL_RANGE, DEFAULT_WEEKLY_WORKOUTS, KG_RANGE, WEEKLY_WORKOUTS_RANGE } from "../shared/body.ts";
+import { refreshBodyGoalProgress, saveBodyPlan } from "./body.ts";
 import { reviewPeriodStart, weekStartOf } from "./dates.ts";
 import { userToday } from "./telegram/time.ts";
 
@@ -18,11 +18,6 @@ export type ApplyResult =
 const isDate = (s: unknown): s is string => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
 
 const INTENSITIES: WorkoutIntensity[] = ["easy", "moderate", "hard"];
-
-/** The Telegram slots the body prompts use, filled from the defaults when a plan is created (PRD-body §4.3, §6). */
-const BODY_PREF_DEFAULTS: [string, string][] = [
-  ["weigh_at", "07:00"], ["breakfast_at", "08:30"], ["lunch_at", "13:00"], ["dinner_at", "19:30"], ["workout_at", "20:30"],
-];
 
 /** Today in the user's timezone — the date a body summary is computed for (users.timezone; NULL = UTC). */
 async function todayOf(db: D1Database, userId: number): Promise<string> {
@@ -155,29 +150,22 @@ export async function applyProposal(db: D1Database, userId: number, proposal: Gu
       }
     }
     if (start === target) return { ok: false, status: 400, error: "start_kg and target_kg must differ" };
-    const workouts = proposal.weekly_workouts === undefined ? 3 : Math.round(Number(proposal.weekly_workouts));
-    if (!Number.isFinite(workouts) || workouts < 0 || workouts > 14) {
-      return { ok: false, status: 400, error: "weekly_workouts must be from 0 to 14" };
+    const workouts = proposal.weekly_workouts === undefined ? DEFAULT_WEEKLY_WORKOUTS : Math.round(Number(proposal.weekly_workouts));
+    if (!Number.isFinite(workouts) || workouts < WEEKLY_WORKOUTS_RANGE[0] || workouts > WEEKLY_WORKOUTS_RANGE[1]) {
+      return { ok: false, status: 400, error: `weekly_workouts must be from ${WEEKLY_WORKOUTS_RANGE[0]} to ${WEEKLY_WORKOUTS_RANGE[1]}` };
     }
     let kcal: number | null = null;
     if (proposal.daily_kcal !== undefined && proposal.daily_kcal !== null) {
       kcal = Math.round(Number(proposal.daily_kcal));
-      if (!Number.isFinite(kcal) || kcal < 800 || kcal > 6000) {
-        return { ok: false, status: 400, error: "daily_kcal must be from 800 to 6000, or omitted" };
+      if (!Number.isFinite(kcal) || kcal < DAILY_KCAL_RANGE[0] || kcal > DAILY_KCAL_RANGE[1]) {
+        return { ok: false, status: 400, error: `daily_kcal must be from ${DAILY_KCAL_RANGE[0]} to ${DAILY_KCAL_RANGE[1]}, or omitted` };
       }
     }
-    // One plan per user: attaching it to another goal replaces the old one, as the Goals page does.
-    await db.prepare(
-      `INSERT INTO body_plans (user_id, goal_id, start_kg, target_kg, weekly_workouts, daily_kcal) VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT (user_id) DO UPDATE SET
-         goal_id = excluded.goal_id, start_kg = excluded.start_kg, target_kg = excluded.target_kg,
-         weekly_workouts = excluded.weekly_workouts, daily_kcal = excluded.daily_kcal, updated_at = datetime('now')`
-    ).bind(userId, goal.id, start, target, workouts, kcal).run();
-    await db.prepare("INSERT OR IGNORE INTO telegram_prefs (user_id) VALUES (?)").bind(userId).run();
-    for (const [field, value] of BODY_PREF_DEFAULTS) {
-      await db.prepare(`UPDATE telegram_prefs SET ${field} = COALESCE(${field}, ?) WHERE user_id = ?`).bind(value, userId).run();
-    }
-    await refreshBodyGoalProgress(db, userId, await todayOf(db, userId));
+    // One plan per user: attaching it to another goal moves it, exactly as the Goals page does.
+    // The Guide never picks the input unit, so a plan that already has one keeps it.
+    await saveBodyPlan(db, userId,
+      { goal_id: goal.id, start_kg: start, target_kg: target, weekly_workouts: workouts, daily_kcal: kcal },
+      await todayOf(db, userId));
     return { ok: true, applied: "body_plan" };
   }
 
