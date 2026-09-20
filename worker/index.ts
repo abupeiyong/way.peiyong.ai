@@ -20,7 +20,8 @@ import { runSchedules, isDisconnected, localDate, DISCONNECTED_UNTIL } from "./t
 import { ALLOWED_UPDATES, BOT_COMMANDS, sendReply, TelegramApiError, TelegramBot } from "./telegram/api.ts";
 import { describeBrowser, loginUrl, pollLogin, startLoginRequest, LOGIN_TTL_SECONDS } from "./telegram/login.ts";
 import { telegramStats } from "./telegram/events.ts";
-import { bodySummary, detachBodyPlan, latestWeight, loadBodyPlan, loadWeightLogs, refreshBodyGoalProgress, saveBodyPlan, suggestedWeightGoal, weightTrends } from "./body.ts";
+import { bodySummary, detachBodyPlan, latestWeight, loadBodyPlan, loadMealLogs, loadWeightLogs, loadWorkoutLogs, refreshBodyGoalProgress, saveBodyPlan, suggestedWeightGoal, weightTrends } from "./body.ts";
+import { MAX_WORKOUT_MIN } from "./telegram/workout.ts";
 import { d1StateStore } from "./telegram/state.ts";
 import { userToday } from "./telegram/time.ts";
 import { verifyWidgetLogin } from "./telegram/widget.ts";
@@ -28,8 +29,8 @@ import { claimUpdate, handleUpdate, isUpdate, secretTokenOk, SECRET_HEADER } fro
 import { BadInput, coerceFields, dateOrNull, idOrNull, int, nonEmptyText, oneOf, text, type FieldSpecs } from "./validate.ts";
 import { isWeightUnit, toKg, DAILY_KCAL_RANGE, DEFAULT_WEEKLY_WORKOUTS, KG_RANGE, WEEKLY_WORKOUTS_RANGE } from "../shared/body.ts";
 import type {
-  GoalLevel, GoalStatus, GoalType, GuideProposal, Priority, SecuritySettings,
-  TelegramLinkStart, TelegramPrefs, TelegramSettings, User,
+  GoalLevel, GoalStatus, GoalType, GuideProposal, MealKind, MealLog, Priority, SecuritySettings,
+  TelegramLinkStart, TelegramPrefs, TelegramSettings, User, WorkoutIntensity, WorkoutLog,
 } from "../shared/types.ts";
 
 export interface Env {
@@ -594,6 +595,12 @@ app.put("/api/goals/:id", async (c) => {
   const userId = c.get("userId");
   const id = Number(c.req.param("id"));
   const b = await c.req.json<Record<string, unknown>>();
+  // goals.progress is derived from the weight trend for the goal a body plan serves (PRD-body §4.3):
+  // the form renders it read-only and the server drops it, whatever a client sends.
+  if ("progress" in b) {
+    const plan = await loadBodyPlan(c.env.DB, userId);
+    if (plan && plan.goal_id === id) delete b.progress;
+  }
   for (const [f, v] of coerceFields(b, GOAL_FIELDS)) {
     await c.env.DB.prepare(`UPDATE goals SET ${f} = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?`)
       .bind(v, id, userId).run();
@@ -839,25 +846,51 @@ app.get("/api/insights", async (c) => {
 
 // ---------- body ----------
 
+/** How far back the Body page's history reaches (PRD-body §8.1): the last 90 days of every log. */
+const BODY_LOG_DAYS = 90;
+
+const MEAL_KINDS: MealKind[] = ["breakfast", "lunch", "dinner", "snack"];
+const WORKOUT_INTENSITIES: WorkoutIntensity[] = ["easy", "moderate", "hard"];
+/** What a hand-entered estimate may say; well past any real meal, so only a typo is refused. */
+const MEAL_KCAL_MAX = 10000;
+const MEAL_PROTEIN_MAX = 1000;
+
+/** An optional number on a body log: absent, null or "" = no value; out of range is the client's fault. */
+function optionalInt(v: unknown, field: string, min: number, max: number): number | null {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n) || n < min || n > max) {
+    throw new BadInput(`${field} must be an integer from ${min} to ${max}, or empty`);
+  }
+  return n;
+}
+
 /**
- * Everything the Body page draws (PRD-body §10): the deterministic summary, the weigh-ins and the
- * 7-day trend at each of them — all from worker/body.ts, so the page and `/body` in the bot quote
- * the same projected date. `summary` is null when no plan is attached; `suggested` then names the
- * goal that looks like a weight goal, so the page can offer to turn tracking on.
+ * Everything the Body page draws (PRD-body §8.1, §10): the deterministic summary, the last 90 days
+ * of every log, and the 7-day trend at each weigh-in — all from worker/body.ts, so the page and
+ * `/body` in the bot quote the same projected date. `plan` and `summary` are null when no plan is
+ * attached; `suggested` then names the goal that looks like a weight goal, so the page can offer
+ * to turn tracking on.
  */
 app.get("/api/body", async (c) => {
   const userId = c.get("userId");
   const today = await todayFor(c.env.DB, userId);
-  const [summary, weights] = await Promise.all([
+  const from = addDays(today, -(BODY_LOG_DAYS - 1));
+  const [summary, weights, meals, workouts] = await Promise.all([
     bodySummary(c.env.DB, userId, today),
-    loadWeightLogs(c.env.DB, userId),
+    loadWeightLogs(c.env.DB, userId, from),
+    loadMealLogs(c.env.DB, userId, from),
+    loadWorkoutLogs(c.env.DB, userId, from),
   ]);
   const trend = await weightTrends(c.env.DB, userId, weights.map((w) => w.date));
   return c.json({
     today,
+    plan: summary?.plan ?? null,
     summary,
     weights,
     trend,
+    meals,
+    workouts,
     suggested: summary ? null : await suggestedWeightGoal(c.env.DB, userId),
   });
 });
@@ -887,6 +920,68 @@ app.delete("/api/body/weight/:date", async (c) => {
   const date = assertDate(c.req.param("date"));
   await c.env.DB.prepare("DELETE FROM weight_logs WHERE user_id = ? AND date = ?").bind(userId, date).run();
   await refreshBodyGoalProgress(c.env.DB, userId, await todayFor(c.env.DB, userId));
+  return c.json({ ok: true });
+});
+
+/**
+ * Manual entry (PRD-body §10): a meal typed on the web rather than sent to the bot. There is no
+ * estimate to override here, so numbers the user supplies are `user_edited` from the start.
+ */
+app.post("/api/body/meal", async (c) => {
+  const userId = c.get("userId");
+  const b = await c.req.json<Record<string, unknown>>();
+  const date = assertDate(b.date);
+  if (typeof b.kind !== "string" || !MEAL_KINDS.includes(b.kind as MealKind)) {
+    return c.json({ error: `kind must be one of ${MEAL_KINDS.join("|")}` }, 400);
+  }
+  const description = String(b.description ?? "").trim().slice(0, 500);
+  const timeMin = optionalInt(b.time_min, "time_min", 0, 24 * 60 - 1);
+  const kcal = optionalInt(b.kcal, "kcal", 0, MEAL_KCAL_MAX);
+  const protein = optionalInt(b.protein_g, "protein_g", 0, MEAL_PROTEIN_MAX);
+  const row = await c.env.DB.prepare(
+    `INSERT INTO meal_logs (user_id, date, time_min, kind, description, kcal, protein_g, user_edited)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     RETURNING id, date, time_min, kind, description, kcal, protein_g, user_edited, confidence`
+  ).bind(userId, date, timeMin, b.kind, description, kcal, protein, kcal !== null || protein !== null ? 1 : 0)
+    .first<MealLog>();
+  return c.json({ meal: row });
+});
+
+app.delete("/api/body/meal/:id", async (c) => {
+  const userId = c.get("userId");
+  await c.env.DB.prepare("DELETE FROM meal_logs WHERE id = ? AND user_id = ?")
+    .bind(Number(c.req.param("id")), userId).run();
+  return c.json({ ok: true });
+});
+
+/** Manual entry (PRD-body §10): activity and minutes, the same row the bot's `/workout` writes. */
+app.post("/api/body/workout", async (c) => {
+  const userId = c.get("userId");
+  const b = await c.req.json<Record<string, unknown>>();
+  const date = assertDate(b.date);
+  // `activity` is stored normalised, like every other path into workout_logs.
+  const activity = String(b.activity ?? "").trim().toLowerCase().slice(0, 60);
+  if (!activity) return c.json({ error: "activity required" }, 400);
+  const minutes = optionalInt(b.minutes, "minutes", 1, MAX_WORKOUT_MIN);
+  if (minutes === null) return c.json({ error: `minutes must be from 1 to ${MAX_WORKOUT_MIN}` }, 400);
+  let intensity: WorkoutIntensity | null = null;
+  if (b.intensity !== undefined && b.intensity !== null && b.intensity !== "") {
+    if (typeof b.intensity !== "string" || !WORKOUT_INTENSITIES.includes(b.intensity as WorkoutIntensity)) {
+      return c.json({ error: `intensity must be one of ${WORKOUT_INTENSITIES.join("|")}, or empty` }, 400);
+    }
+    intensity = b.intensity as WorkoutIntensity;
+  }
+  const row = await c.env.DB.prepare(
+    `INSERT INTO workout_logs (user_id, date, activity, minutes, intensity, note) VALUES (?, ?, ?, ?, ?, ?)
+     RETURNING id, date, activity, minutes, intensity, note, task_id`
+  ).bind(userId, date, activity, minutes, intensity, String(b.note ?? "").slice(0, 200)).first<WorkoutLog>();
+  return c.json({ workout: row });
+});
+
+app.delete("/api/body/workout/:id", async (c) => {
+  const userId = c.get("userId");
+  await c.env.DB.prepare("DELETE FROM workout_logs WHERE id = ? AND user_id = ?")
+    .bind(Number(c.req.param("id")), userId).run();
   return c.json({ ok: true });
 });
 
