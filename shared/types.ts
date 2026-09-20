@@ -206,6 +206,88 @@ export interface Review {
   created_at: string;
 }
 
+// ---------- Body (docs/PRD-body.md) ----------
+
+export type WorkoutIntensity = "easy" | "moderate" | "hard";
+export type MealKind = "breakfast" | "lunch" | "dinner" | "snack";
+/** How the weight trend compares with the goal's target date (PRD-body §8.1). */
+export type BodyVerdict = "ahead" | "on_track" | "behind" | "stalled" | "wrong_way" | "no_data";
+
+/** body_plans: one per user, attached to the goal it serves. */
+export interface BodyPlan {
+  goal_id: number;
+  /** The goal's title, so every client can name it without a second query. */
+  goal_title: string;
+  /** The goal's target_date; null = no deadline, so there is nothing to be ahead of. */
+  target_date: string | null;
+  metric: string;
+  start_kg: number;
+  target_kg: number;
+  weekly_workouts: number;
+  daily_kcal: number | null;
+  /** kg|jin|lb — display and input parsing only; storage is always kg. */
+  input_unit: string;
+}
+
+export interface WeightLog {
+  date: string;
+  kg: number;
+  source: string;
+  note: string;
+}
+
+export interface WorkoutLog {
+  id: number;
+  date: string;
+  activity: string;
+  minutes: number;
+  intensity: WorkoutIntensity | null;
+  note: string;
+  task_id: number | null;
+}
+
+export interface MealLog {
+  id: number;
+  date: string;
+  time_min: number | null;
+  kind: MealKind;
+  description: string;
+  kcal: number | null;
+  protein_g: number | null;
+  user_edited: number;
+  confidence: string | null;
+}
+
+/** The deterministic numbers behind a weight goal (PRD-body §8.1). No model touches these. */
+export interface BodySummary {
+  plan: BodyPlan;
+  /** The local date the summary was computed for. */
+  today: string;
+  /** The latest weigh-in, whatever its date. */
+  latest: WeightLog | null;
+  /** 7-day moving average at `today`; null with fewer than two readings in the window. */
+  trend: number | null;
+  /** The same average a week earlier, for "↓0.3". */
+  trend_prev: number | null;
+  /** Least-squares slope of the trend over the last 28 days, per week; null with fewer than 7 readings. */
+  rate_kg_per_week: number | null;
+  /** Kilograms still to go, signed by the plan's direction; ≤ 0 = reached. */
+  remaining_kg: number | null;
+  /** When the trend reaches the target; null when it is flat or moving away. */
+  projected_date: string | null;
+  verdict: BodyVerdict;
+  /** 0..100, what goals.progress becomes for this goal; null when start and target are equal. */
+  progress: number | null;
+  week: {
+    workouts_done: number;
+    workouts_target: number;
+    minutes: number;
+    /** Average kcal over the days that have a logged meal with calories; null when none do. */
+    kcal_avg: number | null;
+    meals_logged: number;
+  };
+}
+
 /** A change the Guide proposes; applied only after the user approves. */
 export type GuideProposal =
   | { kind: "create_goal"; title: string; level: GoalLevel; area?: string; parent_title?: string; target_date?: string; success_criteria?: string; description?: string }
@@ -213,7 +295,10 @@ export type GuideProposal =
   | { kind: "set_top_three"; date: string; outcomes: string[] }
   | { kind: "set_weekly_plan"; week_start: string; theme?: string; outcomes: string[] }
   | { kind: "update_goal_progress"; goal_title: string; progress: number }
-  | { kind: "create_review"; period: ReviewPeriod; period_start: string; answers: Record<string, string> };
+  | { kind: "create_review"; period: ReviewPeriod; period_start: string; answers: Record<string, string> }
+  | { kind: "set_body_plan"; goal_title: string; start_kg: number; target_kg: number; weekly_workouts?: number; daily_kcal?: number | null }
+  | { kind: "log_workout"; date: string; activity: string; minutes: number; intensity?: WorkoutIntensity; note?: string }
+  | { kind: "log_weight"; date: string; kg: number; note?: string };
 
 export interface GuideMessage {
   id: number;

@@ -7,9 +7,11 @@
 //   /done         open tasks as ✓ buttons        /inbox   inbox items with [今天] [明天] [🗑]
 //   /week         this week's plan (weekly.ts)   /goals   goals.ts        /review [daily|weekly]
 //   /note <text>  append to today's reflection   /guide <text>            /find <text>
+//   /body         the weight goal's numbers: trend, rate, projected date, verdict (body.ts)
 //   /timezone /settings /mute /unlink            account.ts
 //   /help         this list
 
+import { bodyBlock, bodySummary, suggestedWeightGoal } from "../body.ts";
 import { updateDay } from "../days.ts";
 import { materializeRepeats } from "../tasks.ts";
 import { muteCommand, settingsCommand, timezoneCommand, unlinkCommand } from "./account.ts";
@@ -36,6 +38,7 @@ export const HELP: Reply = {
     "/inbox  收件箱 · Inbox",
     "/week  本周计划 · This week",
     "/goals  目标进度 · Goals",
+    "/body  体重趋势和预计达成日 · Weight trend and projection",
     "/review  今日复盘 · Review the day（/review weekly 周复盘）",
     "/note 一句话  记进今天的反思 · Add to today's reflection",
     "/guide 问题  问道引 · Ask the Guide",
@@ -68,6 +71,7 @@ export async function handleCommand(ctx: CommandContext, name: string, args: str
     case "inbox": await inboxCommand(ctx); break;
     case "week": await weekCommand(ctx); break;
     case "goals": await goalsCommand(ctx); break;
+    case "body": await bodyCommand(ctx); break;
     case "review": await startReview(ctx, /^w/i.test(args) ? "weekly" : "daily"); return; // starts its own state
     case "note": await noteCommand(ctx, args); break;
     case "guide": await guideCommand(ctx, args); break;
@@ -211,6 +215,26 @@ async function inboxCommand(ctx: CommandContext): Promise<void> {
       },
     });
   }
+}
+
+// ---------- /body ----------
+
+/**
+ * The deterministic body block (PRD-body §8.3, §11): verdict, projected date and rate, the same numbers
+ * a Guide reply about the goal quotes. Without a plan, the offer to turn one on.
+ */
+async function bodyCommand(ctx: CommandContext): Promise<void> {
+  const summary = await bodySummary(ctx.db, ctx.userId, ctx.today);
+  if (summary) {
+    await ctx.send({ text: bodyBlock(summary) });
+    return;
+  }
+  const suggested = await suggestedWeightGoal(ctx.db, ctx.userId);
+  await ctx.send({
+    text: suggested
+      ? `这是体重目标？开启体重追踪 · Track this as a weight goal\n🎯 ${suggested}\n在网页的目标页加上身体计划 · Add a body plan to the goal on the web.`
+      : "还没有身体计划 · No body plan yet.\n在网页给体重目标加上身体计划，之后这里就有趋势和预计达成日 · Add one to a weight goal on the web.",
+  });
 }
 
 // ---------- /note ----------

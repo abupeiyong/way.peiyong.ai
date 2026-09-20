@@ -2,7 +2,8 @@
 // Workers AI otherwise. Replies are plain text plus optional structured proposals
 // that the client renders as approve-able cards; nothing changes without approval.
 
-import type { GuideProposal } from "../shared/types.ts";
+import type { BodySummary, GuideProposal } from "../shared/types.ts";
+import { asksAboutBody, bodyContextLine, bodySummary, bodyVerdictLine, suggestedWeightGoal } from "./body.ts";
 import { userToday } from "./telegram/time.ts";
 import { weekStartOf } from "./dates.ts";
 
@@ -25,7 +26,14 @@ You NEVER change data yourself. When a change would help, append a fenced block 
   {"kind":"set_weekly_plan","week_start":"YYYY-MM-DD (Monday)","theme":"...","outcomes":["...","...","..."]}
   {"kind":"update_goal_progress","goal_title":"exact existing goal title","progress":70}
   {"kind":"create_review","period":"daily|weekly|monthly|quarterly|yearly","period_start":"YYYY-MM-DD","answers":{"review question":"answer"}}
-Keep proposals few and high-leverage. The user approves or ignores them.`;
+  {"kind":"set_body_plan","goal_title":"exact existing goal title","start_kg":74.2,"target_kg":70,"weekly_workouts":3,"daily_kcal":1900}
+  {"kind":"log_workout","date":"YYYY-MM-DD","activity":"run","minutes":30,"intensity":"easy|moderate|hard?"}
+  {"kind":"log_weight","date":"YYYY-MM-DD","kg":72.4}
+Keep proposals few and high-leverage. The user approves or ignores them.
+
+Body: when the context has a \`Body:\` line, it holds every number about the weight goal — the 7-day trend, the weekly rate, what is left, the projected date and the verdict. Quote those; never fit, extrapolate or invent a projection of your own, and when the line says n/a say the weigh-ins are not enough yet. Propose \`set_body_plan\` only when the line says there is no plan, \`log_weight\` when the user reports a weight ("I was 72.4 this morning"), and \`log_workout\` when they describe training they did. Never propose a meal: meals come from the user or a photo, not from prose.
+
+You are not a clinician. Speak about habits and averages. If the user reports a weight change over 1.5 kg in a week in either direction, or mentions an eating disorder, suggest they talk to a doctor and stop giving targets.`;
 
 export interface ChatMsg {
   role: "system" | "user" | "assistant";
@@ -78,6 +86,14 @@ export function extractProposals(reply: string): { text: string; proposals: Guid
 
 /** The planning state the Guide sees, rebuilt for every message. */
 export async function guideContext(db: D1Database, userId: number): Promise<string> {
+  return (await guideState(db, userId)).context;
+}
+
+/**
+ * The context plus the body summary it quotes, so the caller can put the deterministic answer
+ * in front of the model's words without recomputing it (PRD-body §8.3).
+ */
+export async function guideState(db: D1Database, userId: number): Promise<{ context: string; body: BodySummary | null }> {
   // SELECT * keeps this working before migration 0002 adds users.timezone.
   const user = await db.prepare("SELECT * FROM users WHERE id = ?").bind(userId)
     .first<{ name: string; direction: string; timezone?: string | null }>();
@@ -95,6 +111,9 @@ export async function guideContext(db: D1Database, userId: number): Promise<stri
     .bind(userId, today).first<Record<string, string>>();
   const plan = await db.prepare("SELECT theme, outcome1, outcome2, outcome3 FROM weekly_plans WHERE user_id = ? AND week_start = ?")
     .bind(userId, weekStartOf(today)).first<Record<string, string>>();
+  // Body (PRD-body §9): the summary when a plan exists, the offer when a goal looks like a weight goal.
+  const body = await bodySummary(db, userId, today);
+  const suggested = body ? null : await suggestedWeightGoal(db, userId);
 
   const lines = [
     `Today: ${today}`,
@@ -107,8 +126,10 @@ export async function guideContext(db: D1Database, userId: number): Promise<stri
     `Today's intention: ${day?.intention || "(none)"}`,
     `Today's top three: ${day ? [day.top1, day.top2, day.top3].filter(Boolean).join("; ") || "(empty)" : "(empty)"}`,
     `Today's tasks: ${tasks.length ? tasks.map((t) => `${t.title}${t.done ? " ✓" : ""}`).join("; ") : "(none)"}`,
+    ...(body ? [`Body: ${bodyContextLine(body)}`] : []),
+    ...(suggested ? [`Body: no plan (goal "${suggested}" looks like a weight goal)`] : []),
   ];
-  return lines.join("\n");
+  return { context: lines.join("\n"), body };
 }
 
 /**
@@ -125,12 +146,15 @@ export async function guideChat(
   ).bind(userId).all<{ role: "user" | "assistant"; content: string }>();
   const history: ChatMsg[] = recent.reverse().map((m) => ({ role: m.role, content: m.content }));
 
-  const reply = await chatComplete(env, await guideContext(db, userId), history);
+  const { context, body } = await guideState(db, userId);
+  const reply = await chatComplete(env, context, history);
   const { text, proposals } = extractProposals(reply);
+  // "能不能达成" is answered from the summary first, in the same words /body uses (PRD-body §8.3).
+  const answer = body && asksAboutBody(message, body) ? `${bodyVerdictLine(body)}\n\n${text}`.trim() : text;
 
   const saved = await db.prepare(
     "INSERT INTO guide_messages (user_id, role, content, proposals) VALUES (?, 'assistant', ?, ?) RETURNING id"
-  ).bind(userId, text, proposals.length ? JSON.stringify(proposals) : null).first<{ id: number }>();
+  ).bind(userId, answer, proposals.length ? JSON.stringify(proposals) : null).first<{ id: number }>();
   if (!saved) throw new Error("could not save the Guide reply");
-  return { id: saved.id, text, proposals };
+  return { id: saved.id, text: answer, proposals };
 }
