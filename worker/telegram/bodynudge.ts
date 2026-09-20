@@ -3,7 +3,7 @@
 //     1 no weigh-in for 3 days · 2 workouts behind pace · 3 trend the wrong way two weeks · 4 kcal over budget 3 days
 //     At most ONE message a day (the scheduler's daily outbox claim) and at most one of each rule a week
 //     (telegram_outbox_log kind `body_nudge:<rule>`, keyed by the week's Monday). No streaks, no guilt.
-//   bn:<rule>   → the nudge's one button: the weight ask · a 30-minute task · a Guide turn · the Body page
+//   bn:<rule>   → the nudge's one button: the weight ask (weight.ts) · a 30-minute task · a Guide turn · the Body page
 //   body_recap  → sent inside Sunday's weekly_review when a plan exists: the §8.2 block, then one Guide turn
 //                 asked for at most one proposal, rendered with the usual [✓ 采用] buttons. No model = the block alone.
 //
@@ -15,11 +15,11 @@ import { addDays, weekdayOf, weekStartOf } from "../dates.ts";
 import { guideChat, type GuideEnv } from "../guide.ts";
 import { applyProposal } from "../proposals.ts";
 import type { BodySummary } from "../../shared/types.ts";
-import { KG_RANGE } from "../../shared/body.ts";
 import { cb, type CallbackContext } from "./callback.ts";
 import { logEvent, logReply } from "./events.ts";
 import { guideReplyCard } from "./guide.ts";
 import type { Reply } from "./router.ts";
+import { askWeight } from "./weight.ts";
 
 /** The rules of §6.2, in the priority order they are checked in. */
 export const BODY_NUDGE_RULES = ["weigh", "workout", "trend", "kcal"] as const;
@@ -179,7 +179,7 @@ export async function bodyNudgeAction(ctx: CallbackContext, rule: BodyNudgeRule)
   const s = await bodySummary(ctx.db, ctx.userId, ctx.today);
   if (!s) return "没有身体计划 · No body plan";
   if (rule === "weigh") {
-    await askWeight(ctx);
+    await askWeight(ctx, "body_nudge");
     return "回复体重就行 · Reply with your weight";
   }
   if (rule === "workout") {
@@ -215,80 +215,6 @@ export async function bodyNudgeAction(ctx: CallbackContext, rule: BodyNudgeRule)
     reply_markup: { inline_keyboard: [[{ text: "📈 身体 · Body", url: `${ctx.origin}/body` }]] },
   });
   return "打开身体页 · Body page";
-}
-
-// ---------- the weight ask (PRD-body §5.1), as far as the nudge needs it ----------
-
-/** How long a reply still counts as the weight. */
-export const WEIGHT_ANSWER_SECONDS = 3 * 60 * 60;
-
-interface WeightState {
-  kind: "awaiting_weight";
-  date: string;
-  expires_at: number;
-}
-
-function isWeightState(v: unknown): v is WeightState {
-  const s = v as Partial<WeightState> | null;
-  return !!s && typeof s === "object" && s.kind === "awaiting_weight"
-    && typeof s.date === "string" && typeof s.expires_at === "number";
-}
-
-/** The strict weight pattern of §5.1: anything else is not a weight and goes to capture as usual. */
-const WEIGHT_RE = /^\s*(?:体重|weight)?\s*(\d{2,3}(?:[.,]\d)?)\s*(kg|公斤|斤|lb|lbs|磅)?\s*$/i;
-const UNIT_KG: Record<string, number> = { "斤": 0.5, lb: 0.4536, lbs: 0.4536, "磅": 0.4536 };
-
-/** `72.4`, `72,4 kg`, `145 lb` → kilograms; null when the text is not a weight. */
-export function parseWeightKg(text: string): number | null {
-  const m = WEIGHT_RE.exec(text);
-  if (!m) return null;
-  const kg = Number(m[1].replace(",", ".")) * (UNIT_KG[(m[2] ?? "").toLowerCase()] ?? 1);
-  if (!Number.isFinite(kg) || kg < KG_RANGE[0] || kg > KG_RANGE[1]) return null;
-  return Math.round(kg * 10) / 10;
-}
-
-/** 现在称 ⚖️ — a ForceReply for today's weight; telegram_state waits 3 h for it. */
-export async function askWeight(ctx: Pick<CallbackContext, "state" | "send" | "today">): Promise<void> {
-  const state: WeightState = { kind: "awaiting_weight", date: ctx.today, expires_at: Date.now() + WEIGHT_ANSWER_SECONDS * 1000 };
-  await ctx.state.put(state, WEIGHT_ANSWER_SECONDS);
-  await ctx.send({
-    text: "⚖️ 今天体重？ · Weight today?\n直接回复数字就行 · Just reply with the number",
-    reply_markup: { force_reply: true, input_field_placeholder: "72.4" },
-  });
-}
-
-/** One line after a weigh-in: the reading, the trend and what is left (§5.1). */
-function weighEcho(s: BodySummary, kg: number): string {
-  const trend = s.trend === null ? "—" : kgText(s.trend);
-  const move = s.trend !== null && s.trend_prev !== null ? ` ${deltaText(s.trend - s.trend_prev)}/周·wk` : "";
-  const gap = s.remaining_kg === null ? "" : s.remaining_kg > 0 ? ` · 距目标 ${kgText(s.remaining_kg)} kg` : " · 已达目标 ✓";
-  return `⚖️ ${kgText(kg)} kg · 7日均 ${trend}${move}${gap}`;
-}
-
-/**
- * Router step 3: a typed answer while the weight ask is open. Anything that is not a weight falls through
- * to capture with the slot left open, so the next number still counts (§5.1).
- */
-export async function weightAnswer(ctx: Pick<CallbackContext, "db" | "userId" | "today" | "state" | "send">, text: string): Promise<boolean> {
-  const state = await ctx.state.get();
-  if (!isWeightState(state)) return false;
-  if (Date.now() > state.expires_at) {
-    await ctx.state.clear();
-    return false;
-  }
-  const kg = parseWeightKg(text);
-  if (kg === null) return false;
-  // The same write as the Guide's log_weight proposal, so one path keeps goals.progress derived.
-  const r = await applyProposal(ctx.db, ctx.userId, { kind: "log_weight", date: ctx.today, kg });
-  if (!r.ok) {
-    await ctx.send({ text: `没能记下 · Could not log: ${r.error}` });
-    return true;
-  }
-  await ctx.state.clear();
-  await logReply(ctx.db, ctx.userId, "body_nudge", ctx.today);
-  const s = await bodySummary(ctx.db, ctx.userId, ctx.today);
-  await ctx.send({ text: s ? weighEcho(s, kg) : `⚖️ ${kgText(kg)} kg 已记下 · Logged` });
-  return true;
 }
 
 // ---------- body_recap (§8.2) ----------

@@ -14,6 +14,7 @@
     "check:telegram": "node worker/telegram/api.check.ts",
     "check:workout": "node worker/telegram/workout.check.ts",
     "check:meal": "node worker/telegram/meal.check.ts",
+    "check:weight": "node worker/telegram/weight.check.ts",
     "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.worker.json --noEmit"
   },
   "dependencies": {
