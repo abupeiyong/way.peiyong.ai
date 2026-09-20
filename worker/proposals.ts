@@ -2,6 +2,7 @@
 // so a tap and a click write the same rows. Nothing here runs without the user's approval.
 
 import type { GoalLevel, GuideProposal, ReviewPeriod, WorkoutIntensity } from "../shared/types.ts";
+import { KG_RANGE } from "../shared/body.ts";
 import { refreshBodyGoalProgress } from "./body.ts";
 import { reviewPeriodStart, weekStartOf } from "./dates.ts";
 import { userToday } from "./telegram/time.ts";
@@ -17,8 +18,6 @@ export type ApplyResult =
 const isDate = (s: unknown): s is string => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
 
 const INTENSITIES: WorkoutIntensity[] = ["easy", "moderate", "hard"];
-/** The weight a body can plausibly have, in kg (PRD-body §5.1); anything else is a typo, not a weigh-in. */
-const KG_RANGE: [number, number] = [30, 300];
 
 /** The Telegram slots the body prompts use, filled from the defaults when a plan is created (PRD-body §4.3, §6). */
 const BODY_PREF_DEFAULTS: [string, string][] = [

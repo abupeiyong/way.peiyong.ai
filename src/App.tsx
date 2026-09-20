@@ -8,6 +8,7 @@ import Timeline from "./pages/Timeline.tsx";
 import Goals from "./pages/Goals.tsx";
 import Projects from "./pages/Projects.tsx";
 import Reviews from "./pages/Reviews.tsx";
+import Body from "./pages/Body.tsx";
 import Insights from "./pages/Insights.tsx";
 import Guide from "./pages/Guide.tsx";
 import Settings from "./pages/Settings.tsx";
@@ -31,6 +32,7 @@ const NAV_ITEMS: [string, string, string, string][] = [
   ["/goals", "目标", "Goals", "target"],
   ["/projects", "项目", "Projects", "folder"],
   ["/reviews", "复盘", "Reviews", "review"],
+  ["/body", "身体", "Body", "scale"],
   ["/insights", "洞察", "Insights", "chart"],
   ["/guide", "道引", "Guide", "compass"],
 ];
@@ -74,6 +76,7 @@ export default function App() {
       case "/goals": return <Goals />;
       case "/projects": return <Projects />;
       case "/reviews": return <Reviews />;
+      case "/body": return <Body />;
       case "/insights": return <Insights />;
       case "/guide": return <Guide />;
       case "/settings": return <Settings />;

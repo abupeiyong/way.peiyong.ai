@@ -20,6 +20,7 @@ import { directionSkip, timezonePick } from "./register.ts";
 import { muteFor, settingsToggle, unlinkConfirm } from "./account.ts";
 import { proposalAnswer, taskAskGuide } from "./guide.ts";
 import { bodyNudgeAction, type BodyNudgeRule } from "./bodynudge.ts";
+import { bodyAction } from "./commands.ts";
 import { MAX_WORKOUT_MIN, offerWorkoutFromTask, workoutFromTask, workoutPick, type WorkoutPick } from "./workout.ts";
 import { mealButton, mealPromptButton, type MealAction, type MealPromptAction } from "./meal.ts";
 import type { Reply } from "./router.ts";
@@ -43,6 +44,11 @@ const BLOCK_CODES = { done: "d", snooze: "z", tomorrow: "t" } as const satisfies
 
 export type SettingsToggle = "nudges" | "block_reminders" | "streaks";
 const SETTINGS_CODES = { nudges: "n", block_reminders: "b", streaks: "s" } as const satisfies Record<SettingsToggle, string>;
+
+/** The three logging buttons under `/body` (PRD-body §11); each opens an ask that already exists. */
+export const BODY_ACTIONS = ["weigh", "meal", "workout"] as const;
+export type BodyAction = (typeof BODY_ACTIONS)[number];
+const BODY_ACTION_CODES = { weigh: "w", meal: "m", workout: "o" } as const satisfies Record<BodyAction, string>;
 
 /** The body nudge rules of PRD-body §6.2; the tapped rule decides what the button does. */
 const BODY_NUDGE_CODES = { weigh: "w", workout: "o", trend: "t", kcal: "k" } as const satisfies Record<BodyNudgeRule, string>;
@@ -101,6 +107,7 @@ type ProposalAnswer<MsgId extends Num, Idx extends Num> = `pr:${MsgId}:${Idx}:${
 /** "Send me today's brief" on the link welcome (link.ts). */
 type Brief = "br";
 type BodyNudge = `bn:${(typeof BODY_NUDGE_CODES)[BodyNudgeRule]}`;
+type BodyActionData = `bd:${(typeof BODY_ACTION_CODES)[BodyAction]}`;
 type WorkoutPickData = `wo:${(typeof WORKOUT_CODES)[WorkoutPick]}`;
 type WorkoutFromTask<Id extends Num, Min extends Num> = `wo:t:${Id}:${Min}`;
 type Meal<Id extends Num> = `ml:${Id}:${(typeof MEAL_CODES)[MealAction]}`;
@@ -141,6 +148,7 @@ export type Callback =
   | { verb: "proposal"; msgId: number; idx: number; approve: boolean }
   | { verb: "brief" }
   | { verb: "body_nudge"; rule: BodyNudgeRule }
+  | { verb: "body_action"; action: BodyAction }
   | { verb: "workout_pick"; pick: WorkoutPick }
   | { verb: "workout_task"; taskId: number; min: number }
   | { verb: "meal"; mealId: number; action: MealAction }
@@ -160,7 +168,7 @@ type Widest =
   | ReviewStep | ReviewSkip<"9"> | ReviewFocus<"2026-12-31"> | Carry<"2026-12-31"> | TopThree<"2026-12-31">
   | TopDone<"3", "2026-12-31"> | GoalProgress<MaxId, "100"> | GoalAct<MaxId> | GoalList | Weekly<"2026-12-31">
   | Block<MaxId> | Checkin<MaxId, "10"> | Login<MaxId> | Register | TimezonePick<"30"> | Settings | Mute | Unlink
-  | DirectionSkip | ProposalAnswer<MaxId, "99"> | Brief | BodyNudge
+  | DirectionSkip | ProposalAnswer<MaxId, "99"> | Brief | BodyNudge | BodyActionData
   | WorkoutPickData | WorkoutFromTask<MaxId, "600"> | Meal<MaxId> | MealPrompt<"2026-12-31">;
 type Budget<N extends number, T extends 0[] = []> = T["length"] extends N ? T : Budget<N, [...T, 0]>;
 type Fits<S extends string, B extends 0[]> = S extends `${infer _}${infer Rest}`
@@ -303,6 +311,10 @@ export function parseCallback(data: string): Callback | null {
       const rule = codeOf<BodyNudgeRule>(BODY_NUDGE_CODES, p[1]);
       return p.length === 2 && rule ? { verb: "body_nudge", rule } : null;
     }
+    case "bd": {
+      const action = codeOf<BodyAction>(BODY_ACTION_CODES, p[1]);
+      return p.length === 2 && action ? { verb: "body_action", action } : null;
+    }
     case "wo": {
       if (p.length === 2) {
         const pick = codeOf<WorkoutPick>(WORKOUT_CODES, p[1]);
@@ -373,6 +385,7 @@ export const cb = {
     checked(`pr:${msgId}:${idx}:${approve ? "y" : "n"}` as const),
   brief: (): Brief => checked("br"),
   bodyNudge: (rule: BodyNudgeRule): BodyNudge => checked(`bn:${BODY_NUDGE_CODES[rule]}` as const),
+  bodyAction: (action: BodyAction): BodyActionData => checked(`bd:${BODY_ACTION_CODES[action]}` as const),
   workoutPick: (pick: WorkoutPick): WorkoutPickData => checked(`wo:${WORKOUT_CODES[pick]}` as const),
   workoutTask: (taskId: number, min: number): WorkoutFromTask<number, number> => checked(`wo:t:${taskId}:${min}` as const),
   meal: (mealId: number, action: MealAction): Meal<number> => checked(`ml:${mealId}:${MEAL_CODES[action]}` as const),
@@ -466,6 +479,7 @@ async function dispatch(ctx: CallbackContext, p: Callback): Promise<string | und
     case "proposal": return proposalAnswer(ctx, p.msgId, p.idx, p.approve);
     case "brief": return brief(ctx);
     case "body_nudge": return bodyNudgeAction(ctx, p.rule);
+    case "body_action": return bodyAction(ctx, p.action);
     case "workout_pick": return workoutPick(ctx, p.pick);
     case "workout_task": return workoutFromTask(ctx, p.taskId, p.min);
     case "meal": return mealButton(ctx, p.mealId, p.action);

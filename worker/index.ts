@@ -20,12 +20,13 @@ import { runSchedules, isDisconnected, localDate, DISCONNECTED_UNTIL } from "./t
 import { ALLOWED_UPDATES, BOT_COMMANDS, sendReply, TelegramApiError, TelegramBot } from "./telegram/api.ts";
 import { describeBrowser, loginUrl, pollLogin, startLoginRequest, LOGIN_TTL_SECONDS } from "./telegram/login.ts";
 import { telegramStats } from "./telegram/events.ts";
-import { loadBodyPlan } from "./body.ts";
+import { bodySummary, loadBodyPlan, loadWeightLogs, refreshBodyGoalProgress, suggestedWeightGoal, weightTrends } from "./body.ts";
 import { d1StateStore } from "./telegram/state.ts";
 import { userToday } from "./telegram/time.ts";
 import { verifyWidgetLogin } from "./telegram/widget.ts";
 import { claimUpdate, handleUpdate, isUpdate, secretTokenOk, SECRET_HEADER } from "./telegram/webhook.ts";
 import { BadInput, coerceFields, dateOrNull, idOrNull, int, nonEmptyText, oneOf, text, type FieldSpecs } from "./validate.ts";
+import { isWeightUnit, toKg, KG_RANGE } from "../shared/body.ts";
 import type {
   GoalLevel, GoalStatus, GoalType, GuideProposal, Priority, SecuritySettings,
   TelegramLinkStart, TelegramPrefs, TelegramSettings, User,
@@ -779,6 +780,7 @@ app.get("/api/insights", async (c) => {
   const today = await todayFor(c.env.DB, userId);
   const d28 = addDays(today, -28);
   const d14 = addDays(today, -14);
+  const d90 = addDays(today, -89);
 
   const totals = await c.env.DB.prepare(
     `SELECT
@@ -822,7 +824,65 @@ app.get("/api/insights", async (c) => {
     "SELECT id, title, progress FROM goals WHERE user_id = ? AND status = 'active' ORDER BY id"
   ).bind(userId).all();
 
-  return c.json({ totals, weeklyCompletion, byArea, moods, planned, goals });
+  // The weight tile (PRD-body §10): the same summary the Body page and the bot quote, with the
+  // readings behind the sparkline. Null without a body plan, and the tile is not rendered.
+  const summary = await bodySummary(c.env.DB, userId, today);
+  const body = summary ? { summary, weights: await loadWeightLogs(c.env.DB, userId, d90) } : null;
+
+  return c.json({ totals, weeklyCompletion, byArea, moods, planned, goals, body });
+});
+
+// ---------- body ----------
+
+/**
+ * Everything the Body page draws (PRD-body §10): the deterministic summary, the weigh-ins and the
+ * 7-day trend at each of them — all from worker/body.ts, so the page and `/body` in the bot quote
+ * the same projected date. `summary` is null when no plan is attached; `suggested` then names the
+ * goal that looks like a weight goal, so the page can offer to turn tracking on.
+ */
+app.get("/api/body", async (c) => {
+  const userId = c.get("userId");
+  const today = await todayFor(c.env.DB, userId);
+  const [summary, weights] = await Promise.all([
+    bodySummary(c.env.DB, userId, today),
+    loadWeightLogs(c.env.DB, userId),
+  ]);
+  const trend = await weightTrends(c.env.DB, userId, weights.map((w) => w.date));
+  return c.json({
+    today,
+    summary,
+    weights,
+    trend,
+    suggested: summary ? null : await suggestedWeightGoal(c.env.DB, userId),
+  });
+});
+
+/** Manual entry (PRD-body §10): one reading per local date, the latest wins, `unit` is input only. */
+app.post("/api/body/weight", async (c) => {
+  const userId = c.get("userId");
+  const b = await c.req.json<{ date?: string; value?: number | string; unit?: string; note?: string }>();
+  const date = assertDate(b.date);
+  const unit = b.unit === undefined ? "kg" : b.unit;
+  if (!isWeightUnit(unit)) return c.json({ error: "unit must be kg, jin or lb" }, 400);
+  const kg = toKg(Number(b.value), unit);
+  if (!Number.isFinite(kg) || kg < KG_RANGE[0] || kg > KG_RANGE[1]) {
+    return c.json({ error: `weight must be from ${KG_RANGE[0]} to ${KG_RANGE[1]} kg` }, 400);
+  }
+  await c.env.DB.prepare(
+    `INSERT INTO weight_logs (user_id, date, kg, source, note) VALUES (?, ?, ?, 'web', ?)
+     ON CONFLICT (user_id, date) DO UPDATE SET kg = excluded.kg, source = excluded.source, note = excluded.note`
+  ).bind(userId, date, kg, String(b.note ?? "")).run();
+  // goals.progress is derived for a goal with a body plan (PRD-body §4.3).
+  await refreshBodyGoalProgress(c.env.DB, userId, await todayFor(c.env.DB, userId));
+  return c.json({ ok: true, kg });
+});
+
+app.delete("/api/body/weight/:date", async (c) => {
+  const userId = c.get("userId");
+  const date = assertDate(c.req.param("date"));
+  await c.env.DB.prepare("DELETE FROM weight_logs WHERE user_id = ? AND date = ?").bind(userId, date).run();
+  await refreshBodyGoalProgress(c.env.DB, userId, await todayFor(c.env.DB, userId));
+  return c.json({ ok: true });
 });
 
 // ---------- guide ----------

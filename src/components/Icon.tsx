@@ -26,6 +26,12 @@ const PATHS: Record<string, JSX.Element> = {
     </>
   ),
   chart: <path d="M3 3v18h18M8 17v-6m4 6V7m4 10v-3" />,
+  scale: (
+    <>
+      <path d="M12 3v18M7 21h10M4 7h16l-2.2-.6a22 22 0 0 0-11.6 0Z" />
+      <path d="M6 7 3 14a3 3 0 0 0 6 0Zm12 0-3 7a3 3 0 0 0 6 0Z" />
+    </>
+  ),
   compass: (
     <>
       <circle cx="12" cy="12" r="9" />

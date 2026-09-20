@@ -15,6 +15,7 @@ import { addDays, weekdayOf, weekStartOf } from "../dates.ts";
 import { guideChat, type GuideEnv } from "../guide.ts";
 import { applyProposal } from "../proposals.ts";
 import type { BodySummary } from "../../shared/types.ts";
+import { KG_RANGE } from "../../shared/body.ts";
 import { cb, type CallbackContext } from "./callback.ts";
 import { logEvent, logReply } from "./events.ts";
 import { guideReplyCard } from "./guide.ts";
@@ -236,8 +237,6 @@ function isWeightState(v: unknown): v is WeightState {
 /** The strict weight pattern of §5.1: anything else is not a weight and goes to capture as usual. */
 const WEIGHT_RE = /^\s*(?:体重|weight)?\s*(\d{2,3}(?:[.,]\d)?)\s*(kg|公斤|斤|lb|lbs|磅)?\s*$/i;
 const UNIT_KG: Record<string, number> = { "斤": 0.5, lb: 0.4536, lbs: 0.4536, "磅": 0.4536 };
-/** The weight a body can plausibly have, in kg (§5.1). */
-const KG_RANGE: [number, number] = [30, 300];
 
 /** `72.4`, `72,4 kg`, `145 lb` → kilograms; null when the text is not a weight. */
 export function parseWeightKg(text: string): number | null {

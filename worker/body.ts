@@ -7,6 +7,7 @@
 // in a try/catch: on a database where 0004 has not run yet, a body-less account is the answer, not a 500.
 
 import type { BodyPlan, BodySummary, BodyVerdict, WeightLog } from "../shared/types.ts";
+import { BODY_VERDICT_TEXT } from "../shared/body.ts";
 import { addDays, weekStartOf } from "./dates.ts";
 
 /** Goal titles that look like a weight goal (PRD-body §4.2) — used to offer a plan, never to create one. */
@@ -92,6 +93,23 @@ export async function weightTrends(db: D1Database, userId: number, dates: string
     const t = trendOf(weights, d);
     return t === null ? null : Math.round(t * 10) / 10;
   });
+}
+
+/**
+ * The weigh-ins from `from` (inclusive) on, oldest first — the Body page's chart and the Insights
+ * sparkline read the same rows the summary is built from. No plan, no 0004: an empty history.
+ */
+export async function loadWeightLogs(db: D1Database, userId: number, from?: string): Promise<WeightLog[]> {
+  try {
+    const { results } = from
+      ? await db.prepare("SELECT date, kg, source, note FROM weight_logs WHERE user_id = ? AND date >= ? ORDER BY date")
+          .bind(userId, from).all<WeightLog>()
+      : await db.prepare("SELECT date, kg, source, note FROM weight_logs WHERE user_id = ? ORDER BY date")
+          .bind(userId).all<WeightLog>();
+    return results;
+  } catch {
+    return []; // migration 0004 has not run here
+  }
 }
 
 /** The whole picture for the user's weight goal, or null when there is no plan. */
@@ -200,15 +218,6 @@ export async function refreshBodyGoalProgress(db: D1Database, userId: number, to
 
 // ---------- wording, shared by /body, the Guide and the web ----------
 
-const VERDICT_TEXT: Record<BodyVerdict, string> = {
-  ahead: "提前 · ahead of the target date",
-  on_track: "按计划 · on track",
-  behind: "落后 · behind the target date",
-  stalled: "停在原地 · stalled",
-  wrong_way: "方向反了 · moving away from the target",
-  no_data: "称重还不够 · not enough weigh-ins yet",
-};
-
 const kg = (n: number): string => n.toFixed(1);
 
 /** −0.30 kg/周·week, or "—" when there is no fit yet. */
@@ -226,7 +235,7 @@ export function bodyVerdictLine(s: BodySummary): string {
   const projected = s.projected_date
     ? `预计 ${s.projected_date} 达到 ${kg(s.plan.target_kg)} kg · projected ${s.projected_date}`
     : `还算不出日期 · no projected date yet`;
-  return `⚖️ ${VERDICT_TEXT[s.verdict]}\n${projected} · ${rateText(s)}${s.plan.target_date ? ` · 目标 ${s.plan.target_date}` : ""}`;
+  return `⚖️ ${BODY_VERDICT_TEXT[s.verdict]}\n${projected} · ${rateText(s)}${s.plan.target_date ? ` · 目标 ${s.plan.target_date}` : ""}`;
 }
 
 /** The body block: the verdict line plus today's numbers and the week (PRD-body §6.1, §11). */
