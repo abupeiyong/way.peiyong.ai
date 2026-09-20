@@ -20,13 +20,13 @@ import { runSchedules, isDisconnected, localDate, DISCONNECTED_UNTIL } from "./t
 import { ALLOWED_UPDATES, BOT_COMMANDS, sendReply, TelegramApiError, TelegramBot } from "./telegram/api.ts";
 import { describeBrowser, loginUrl, pollLogin, startLoginRequest, LOGIN_TTL_SECONDS } from "./telegram/login.ts";
 import { telegramStats } from "./telegram/events.ts";
-import { bodySummary, loadBodyPlan, loadWeightLogs, refreshBodyGoalProgress, suggestedWeightGoal, weightTrends } from "./body.ts";
+import { bodySummary, detachBodyPlan, latestWeight, loadBodyPlan, loadWeightLogs, refreshBodyGoalProgress, saveBodyPlan, suggestedWeightGoal, weightTrends } from "./body.ts";
 import { d1StateStore } from "./telegram/state.ts";
 import { userToday } from "./telegram/time.ts";
 import { verifyWidgetLogin } from "./telegram/widget.ts";
 import { claimUpdate, handleUpdate, isUpdate, secretTokenOk, SECRET_HEADER } from "./telegram/webhook.ts";
 import { BadInput, coerceFields, dateOrNull, idOrNull, int, nonEmptyText, oneOf, text, type FieldSpecs } from "./validate.ts";
-import { isWeightUnit, toKg, KG_RANGE } from "../shared/body.ts";
+import { isWeightUnit, toKg, DAILY_KCAL_RANGE, DEFAULT_WEEKLY_WORKOUTS, KG_RANGE, WEEKLY_WORKOUTS_RANGE } from "../shared/body.ts";
 import type {
   GoalLevel, GoalStatus, GoalType, GuideProposal, Priority, SecuritySettings,
   TelegramLinkStart, TelegramPrefs, TelegramSettings, User,
@@ -550,11 +550,16 @@ app.post("/api/carry", async (c) => {
 
 // ---------- goals & areas ----------
 
+/**
+ * The page also draws the body-plan section on a goal (PRD-body §4.1, §10), so it needs the user's
+ * single plan — which goal it is on, if any — and the latest weigh-in the start weight defaults to.
+ */
 app.get("/api/goals", async (c) => {
   const userId = c.get("userId");
   const areas = await c.env.DB.prepare("SELECT * FROM areas WHERE user_id = ? AND archived = 0 ORDER BY sort, id").bind(userId).all();
   const goals = await c.env.DB.prepare("SELECT * FROM goals WHERE user_id = ? ORDER BY created_at DESC").bind(userId).all();
-  return c.json({ areas: areas.results, goals: goals.results });
+  const [bodyPlan, latest] = await Promise.all([loadBodyPlan(c.env.DB, userId), latestWeight(c.env.DB, userId)]);
+  return c.json({ areas: areas.results, goals: goals.results, body_plan: bodyPlan, latest_kg: latest?.kg ?? null });
 });
 
 const GOAL_TYPES: GoalType[] = ["outcome", "process", "maintenance", "learning"];
@@ -882,6 +887,56 @@ app.delete("/api/body/weight/:date", async (c) => {
   const date = assertDate(c.req.param("date"));
   await c.env.DB.prepare("DELETE FROM weight_logs WHERE user_id = ? AND date = ?").bind(userId, date).run();
   await refreshBodyGoalProgress(c.env.DB, userId, await todayFor(c.env.DB, userId));
+  return c.json({ ok: true });
+});
+
+/**
+ * The body-plan section on a goal (PRD-body §4.1): turn tracking on, move it to another goal, or
+ * change its numbers. `start` and `target` are in `unit` (kg|jin|lb) — storage is always kg — and
+ * one plan exists per user, so a save on a second goal moves it; the page asks before it does.
+ */
+app.put("/api/body/plan", async (c) => {
+  const userId = c.get("userId");
+  const b = await c.req.json<{ goal_id?: number; start?: number | string; target?: number | string; unit?: string; weekly_workouts?: number | string; daily_kcal?: number | string | null }>();
+  const goalId = Number(b.goal_id);
+  if (!Number.isInteger(goalId) || goalId <= 0) return c.json({ error: "goal_id required" }, 400);
+  const goal = await c.env.DB.prepare("SELECT id FROM goals WHERE id = ? AND user_id = ?").bind(goalId, userId).first<{ id: number }>();
+  if (!goal) return c.json({ error: "no such goal" }, 404);
+
+  const unit = b.unit === undefined ? "kg" : b.unit;
+  if (!isWeightUnit(unit)) return c.json({ error: "unit must be kg, jin or lb" }, 400);
+  const start = toKg(Number(b.start), unit);
+  const target = toKg(Number(b.target), unit);
+  for (const [name, v] of [["start", start], ["target", target]] as const) {
+    if (!Number.isFinite(v) || v < KG_RANGE[0] || v > KG_RANGE[1]) {
+      return c.json({ error: `${name} must be a weight from ${KG_RANGE[0]} to ${KG_RANGE[1]} kg` }, 400);
+    }
+  }
+  if (start === target) return c.json({ error: "start and target must differ" }, 400);
+
+  const workouts = b.weekly_workouts === undefined || b.weekly_workouts === "" ? DEFAULT_WEEKLY_WORKOUTS : Math.round(Number(b.weekly_workouts));
+  if (!Number.isFinite(workouts) || workouts < WEEKLY_WORKOUTS_RANGE[0] || workouts > WEEKLY_WORKOUTS_RANGE[1]) {
+    return c.json({ error: `weekly_workouts must be from ${WEEKLY_WORKOUTS_RANGE[0]} to ${WEEKLY_WORKOUTS_RANGE[1]}` }, 400);
+  }
+  let kcal: number | null = null;
+  if (b.daily_kcal !== undefined && b.daily_kcal !== null && b.daily_kcal !== "") {
+    kcal = Math.round(Number(b.daily_kcal));
+    if (!Number.isFinite(kcal) || kcal < DAILY_KCAL_RANGE[0] || kcal > DAILY_KCAL_RANGE[1]) {
+      return c.json({ error: `daily_kcal must be from ${DAILY_KCAL_RANGE[0]} to ${DAILY_KCAL_RANGE[1]}, or empty` }, 400);
+    }
+  }
+
+  await saveBodyPlan(
+    c.env.DB, userId,
+    { goal_id: goalId, start_kg: start, target_kg: target, weekly_workouts: workouts, daily_kcal: kcal, input_unit: unit },
+    await todayFor(c.env.DB, userId)
+  );
+  return c.json({ plan: await loadBodyPlan(c.env.DB, userId) });
+});
+
+/** Detach the plan (PRD-body §4.3): the prompts stop, the weigh-ins and the progress stay. */
+app.delete("/api/body/plan", async (c) => {
+  await detachBodyPlan(c.env.DB, c.get("userId"));
   return c.json({ ok: true });
 });
 
