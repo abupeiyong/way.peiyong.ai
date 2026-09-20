@@ -380,6 +380,7 @@ export const BOT_COMMANDS: BotCommand[] = [
   { command: "week", description: "本周 · This week's plan" },
   { command: "goals", description: "目标 · Goals" },
   { command: "body", description: "身体 · Weight trend and projection" },
+  { command: "weight", description: "称重 · Log your weight" },
   { command: "meal", description: "饮食 · Log a meal" },
   { command: "workout", description: "运动 · Log a workout" },
   { command: "review", description: "复盘 · Review the day" },

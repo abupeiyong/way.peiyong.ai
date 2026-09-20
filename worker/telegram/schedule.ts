@@ -18,6 +18,8 @@
 //
 // Kinds (PRD §6): morning (brief + the ask) · review_prompt · weekly_plan (Mon) · weekly_review (Sun) ·
 // midday_nudge (11:00, only while the top three is empty) · area_checkin (1st of the month) ·
+// weigh_in (telegram_prefs.weigh_at, only with a body plan, nothing weighed today and the morning message
+// off — with it on, the ask rides inside the morning message instead — PRD-body §5.1, §6.1) ·
 // meal_breakfast / meal_lunch / meal_dinner (telegram_prefs.breakfast_at / lunch_at / dinner_at, only with a
 // body plan and no log of that meal today — PRD-body §5.2) ·
 // workout_check (telegram_prefs.workout_at, only with a body plan and nothing logged today — PRD-body §5.4) ·
@@ -39,6 +41,7 @@ import { d1StateStore } from "./state.ts";
 import type { TopThreeContext } from "./topthree.ts";
 import { sendWeeklyPlan, sendWeeklyReview } from "./weekly.ts";
 import { sendWorkoutCheck, workoutCheckDue } from "./workout.ts";
+import { sendWeighIn, weighInDue } from "./weight.ts";
 import { localNow, type LocalNow } from "./time.ts";
 import type { GuideEnv } from "../guide.ts";
 
@@ -148,6 +151,9 @@ const KINDS: ScheduleKind[] = [
   { kind: "weekly_review", slot: (p) => p.weekly_review_at, windowMin: 15, cadence: (_, now) => now.weekday === 0, send: sendWeeklyReview },
   { kind: "midday_nudge", slot: (p) => (p.nudges ? NUDGE_AT : null), windowMin: 15, cadence: daily, condition: topThreeEmpty, send: sendNudge },
   { kind: "area_checkin", slot: (p) => p.checkin_at, windowMin: 15, cadence: (_, now) => now.date.endsWith("-01"), send: sendCheckin },
+  // One morning message stays the rule (PRD-body §6.1): with morning_at set, the weight ask is part of it,
+  // so the separate kind has no slot at all. Silent on a day already weighed (weight.ts).
+  { kind: "weigh_in", slot: (p) => (p.morning_at ? null : p.weigh_at), windowMin: 15, cadence: daily, condition: weighInDue, send: sendWeighIn },
   // The three meal asks are silent on a meal that is already logged — 没吃 counts as logged too (meal.ts).
   { kind: "meal_breakfast", slot: (p) => p.breakfast_at, windowMin: 15, cadence: daily, condition: (ctx) => mealAskDue(ctx, "breakfast"), send: (ctx) => sendMealAsk(ctx, "breakfast") },
   { kind: "meal_lunch", slot: (p) => p.lunch_at, windowMin: 15, cadence: daily, condition: (ctx) => mealAskDue(ctx, "lunch"), send: (ctx) => sendMealAsk(ctx, "lunch") },

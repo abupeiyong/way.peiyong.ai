@@ -9,13 +9,14 @@
 //   /note <text>  append to today's reflection   /guide <text>            /find <text>
 //   /body         the weight goal's numbers: trend, rate, projected date, verdict (body.ts), with
 //                 [📈 图表] into the web Body page and [⚖️ 称重] [🍜 记饭] [🏃 记运动] (bd:<code>)
+//   /weight [72.4]  log the day's weight (kg 公斤 斤 lb 磅); with no number, today and the trend (weight.ts)
 //   /meal [早|午|晚|加餐] <text>  log a meal by text; with no text, the ask with [跳过] [没吃] (meal.ts)
 //   /workout <activity> <minutes> [intensity]  log a workout; with no args, the activity buttons (workout.ts)
 //   /timezone /settings /mute /unlink            account.ts
 //   /help         this list
 
 import { bodyBlock, bodySummary, suggestedWeightGoal } from "../body.ts";
-import { askWeight } from "./bodynudge.ts";
+import { askWeight, weightCommand } from "./weight.ts";
 import { updateDay } from "../days.ts";
 import { materializeRepeats } from "../tasks.ts";
 import { muteCommand, settingsCommand, timezoneCommand, unlinkCommand } from "./account.ts";
@@ -45,6 +46,7 @@ export const HELP: Reply = {
     "/week  本周计划 · This week",
     "/goals  目标进度 · Goals",
     "/body  体重趋势和预计达成日 · Weight trend and projection",
+    "/weight 72.4  记体重 · Log your weight",
     "/meal 牛肉面  记一餐 · Log a meal（/meal 午 牛肉面）",
     "/workout 跑步 30  记一次运动 · Log a workout",
     "/review  今日复盘 · Review the day（/review weekly 周复盘）",
@@ -80,6 +82,7 @@ export async function handleCommand(ctx: CommandContext, name: string, args: str
     case "week": await weekCommand(ctx); break;
     case "goals": await goalsCommand(ctx); break;
     case "body": await bodyCommand(ctx); break;
+    case "weight": await weightCommand(ctx, args); break;
     case "meal": await mealCommand(ctx, args); break;
     case "workout": await workoutCommand(ctx, args); break;
     case "review": await startReview(ctx, /^w/i.test(args) ? "weekly" : "daily"); return; // starts its own state

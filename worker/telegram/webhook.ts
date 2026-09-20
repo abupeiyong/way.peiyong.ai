@@ -8,6 +8,7 @@
 //   unknown     → /start offers to link or to create an account (register.ts); anything else says "link first"
 //   dispatch    → flood guard, then routeUpdate with the handlers below (commands.ts, callback.ts, the state machines)
 //   photo       → a meal photo goes to meal.ts (PRD-body §5.2); every other photo keeps the TEXT_ONLY reply
+//   weight      → with a body plan, a bare "72.4" is a weigh-in before it is a capture (PRD-body §5.1)
 //   errors      → logged, and the user gets 出错了，请稍后再试; the response was already a 200
 //
 // Registration (once per bot): wrangler secret put TELEGRAM_WEBHOOK_SECRET, then POST /api/telegram/setup
@@ -34,7 +35,7 @@ import { mealAnswer, mealNumbersAnswer, mealPhoto } from "./meal.ts";
 import { localDate } from "./schedule.ts";
 import { d1StateStore } from "./state.ts";
 import { topThreeAnswer } from "./topthree.ts";
-import { weightAnswer } from "./bodynudge.ts";
+import { weightAnswer, weightFastPath } from "./weight.ts";
 import { workoutAnswer } from "./workout.ts";
 import { weeklyPlanAnswer } from "./weekly.ts";
 
@@ -201,6 +202,9 @@ async function dispatch(
       || (await onboardAnswer(ctx, text)),
     guideReply: (message, text) => guideReplyThread(ctx, message, text),
     capture: async (message, text) => {
+      // The weight fast path sits over capture, not over the steps above: with a body plan a bare number is
+      // a weigh-in, and its [撤销，记进 Inbox] puts the text here after all (PRD-body §5.1).
+      if (await weightFastPath(ctx, text)) return;
       await send(await captureMessage(db, userId, text, message));
       await logEvent(db, userId, "capture", "used");
     },

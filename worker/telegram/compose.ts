@@ -1,5 +1,8 @@
 // The morning message (PRD §6.1): one message per morning — where you are, then the ask, so it ends on an action.
-//   direction · this week's theme + outcomes · active goals (⚠ within 14 days) · today's blocks · carry-over line
+//   direction · this week's theme + outcomes · active goals (⚠ within 14 days) · today's blocks ·
+//   ⚖️ 身体 · Body when a body plan exists (PRD-body §6.1), ending with the weight ask when today is
+//   still unweighed — that is why there is no separate weigh_in message while morning_at is set ·
+//   carry-over line
 //   ──────
 //   the ask (top three not set)  → [✍️ 写三件事] [📋 抄昨天] [🤖 让道引拟]
 //   or the three (already set)   → [✓ n] per undone item, ending 三件事已定 ✓
@@ -14,6 +17,7 @@ import { updateDay } from "../days.ts";
 import { cb, shiftDate, type CallbackContext } from "./callback.ts";
 import type { InlineKeyboardButton, Reply } from "./router.ts";
 import { askText, awaitTopThree, type TopThreeContext } from "./topthree.ts";
+import { awaitWeight, morningBodyBlock } from "./weight.ts";
 
 export const TELEGRAM_TEXT_MAX = 4096;
 /** Goals due within this many days get ⚠ and the day count. */
@@ -29,6 +33,8 @@ export interface MorningMessage {
   reply: Reply;
   /** True when the message ends with the ask (today's top three not set yet). */
   asks: boolean;
+  /** True when the body block ends with the weight ask (a plan, and nothing weighed today). */
+  weighAsk: boolean;
 }
 
 export interface ComposeOptions {
@@ -119,6 +125,9 @@ export async function composeMorning(
     head.push("", `📅 本周 · This week${plan?.theme?.trim() ? ` — ${plan.theme.trim()}` : ""}`, ...outcomes.map((o, i) => `${i + 1}. ${o}`));
   }
 
+  // The body block (PRD-body §6.1); null without a plan, and read-only like everything else here.
+  const body = await morningBodyBlock(db, userId, date);
+
   const goalLines = goals.map((g) => goalLine(g, date));
   const taskLines = tasks.map(taskLine);
   const carried = carryLine(carryCount, opts.carried);
@@ -139,6 +148,7 @@ export async function composeMorning(
     if (taskLines.length) {
       brief.push("", "🗓 今天 · Today", ...capped(taskLines, tasksShown, (n) => `… 还有 ${n} 件 · and ${n} more — /today`));
     }
+    if (body) brief.push("", body.text);
     if (carried) brief.push("", carried);
     return brief.join("\n");
   };
@@ -166,15 +176,18 @@ export async function composeMorning(
       { text: "放下 Let go", callback_data: cb.carry("drop", date) },
     ]);
   }
-  return { reply: { text, ...(keyboard.length && { reply_markup: { inline_keyboard: keyboard } }) }, asks };
+  return { reply: { text, ...(keyboard.length && { reply_markup: { inline_keyboard: keyboard } }) }, asks, weighAsk: !!body?.ask };
 }
 
 // ---------- entry point ----------
 
 /** The scheduled morning message; when it asks, the next free text (4 h) becomes today's top three. */
 export async function sendMorning(ctx: TopThreeContext): Promise<void> {
-  const { reply, asks } = await composeMorning(ctx.db, ctx.userId, ctx.today);
+  const { reply, asks, weighAsk } = await composeMorning(ctx.db, ctx.userId, ctx.today);
+  // One telegram_state slot, so the message's closing ask wins; when the three are already set, the
+  // body block's weight ask takes it. Either way a bare number is still caught by the fast path (weight.ts).
   if (asks) await awaitTopThree(ctx, ctx.today);
+  else if (weighAsk) await awaitWeight(ctx, ctx.today, "morning");
   await ctx.send(reply);
 }
 
