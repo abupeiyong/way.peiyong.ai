@@ -12,6 +12,7 @@
     "db:migrate:remote": "wrangler d1 migrations apply way-preview-db --remote",
     "telegram:setup": "curl -fsS -X POST -H \"Authorization: Bearer $TELEGRAM_WEBHOOK_SECRET\" \"${WAY_URL:-https://way.peiyong.ai}/api/telegram/setup\"",
     "check:telegram": "node worker/telegram/api.check.ts",
+    "check:workout": "node worker/telegram/workout.check.ts",
     "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.worker.json --noEmit"
   },
   "dependencies": {
