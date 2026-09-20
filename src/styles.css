@@ -718,3 +718,20 @@ textarea.ruled:focus { box-shadow: none; }
 .tg-stats-table td:first-child { color: var(--ink); white-space: nowrap; }
 .auth-deeplink { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; justify-content: center; }
 .auth-deeplink .qr { flex: none; border: 1px solid var(--line); border-radius: 4px; }
+
+/* ---------- body (PRD-body §10) ---------- */
+.body-chart { width: 100%; height: auto; display: block; margin-top: 6px; }
+.body-chart .axis {
+  font-family: var(--serif-en); font-style: italic; font-size: 11px; fill: var(--ink-faint);
+}
+.body-chart .axis.red { fill: var(--red-deep); opacity: 0.85; }
+.body-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 10px; }
+.body-stats .num { font-family: var(--serif-en); font-size: 22px; font-weight: 600; }
+.body-stats .lbl { color: var(--ink-faint); font-size: 0.76rem; margin-top: 2px; letter-spacing: 0.05em; }
+.weigh-row { display: flex; align-items: center; gap: 12px; padding: 6px 0; border-top: 1px solid var(--line-soft); font-size: 0.88rem; }
+.weigh-row:first-of-type { border-top: none; }
+.weigh-row .d { width: 86px; color: var(--ink-soft); font-family: var(--serif-en); font-style: italic; }
+.weigh-row .kg { font-family: var(--serif-en); font-weight: 600; width: 72px; }
+.weigh-row .icon-btn { margin-left: auto; opacity: 0; transition: opacity 0.15s; }
+.weigh-row:hover .icon-btn { opacity: 1; }
+.sparkline { width: 100%; height: 44px; display: block; margin-top: 8px; }

@@ -7,18 +7,20 @@
 //   /done         open tasks as ✓ buttons        /inbox   inbox items with [今天] [明天] [🗑]
 //   /week         this week's plan (weekly.ts)   /goals   goals.ts        /review [daily|weekly]
 //   /note <text>  append to today's reflection   /guide <text>            /find <text>
-//   /body         the weight goal's numbers: trend, rate, projected date, verdict (body.ts)
+//   /body         the weight goal's numbers: trend, rate, projected date, verdict (body.ts), with
+//                 [📈 图表] into the web Body page and [⚖️ 称重] [🍜 记饭] [🏃 记运动] (bd:<code>)
 //   /meal [早|午|晚|加餐] <text>  log a meal by text; with no text, the ask with [跳过] [没吃] (meal.ts)
 //   /workout <activity> <minutes> [intensity]  log a workout; with no args, the activity buttons (workout.ts)
 //   /timezone /settings /mute /unlink            account.ts
 //   /help         this list
 
 import { bodyBlock, bodySummary, suggestedWeightGoal } from "../body.ts";
+import { askWeight } from "./bodynudge.ts";
 import { updateDay } from "../days.ts";
 import { materializeRepeats } from "../tasks.ts";
 import { muteCommand, settingsCommand, timezoneCommand, unlinkCommand } from "./account.ts";
 import { fmtMin } from "./blocks.ts";
-import { cb, shiftDate, type CallbackContext } from "./callback.ts";
+import { cb, shiftDate, type BodyAction, type CallbackContext } from "./callback.ts";
 import { logEvent } from "./events.ts";
 import { findGoal, goalLine, goalsCommand } from "./goals.ts";
 import { guideTurn } from "./guide.ts";
@@ -229,12 +231,25 @@ async function inboxCommand(ctx: CommandContext): Promise<void> {
 
 /**
  * The deterministic body block (PRD-body §8.3, §11): verdict, projected date and rate, the same numbers
- * a Guide reply about the goal quotes. Without a plan, the offer to turn one on.
+ * a Guide reply about the goal quotes, under [📈 图表] into the web page that draws them and the three
+ * logging buttons. Without a plan, the offer to turn one on and a link to the goal.
  */
 async function bodyCommand(ctx: CommandContext): Promise<void> {
   const summary = await bodySummary(ctx.db, ctx.userId, ctx.today);
   if (summary) {
-    await ctx.send({ text: bodyBlock(summary) });
+    await ctx.send({
+      text: bodyBlock(summary),
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "📈 图表 · Chart", url: `${ctx.origin}/body` }],
+          [
+            { text: "⚖️ 称重", callback_data: cb.bodyAction("weigh") },
+            { text: "🍜 记饭", callback_data: cb.bodyAction("meal") },
+            { text: "🏃 记运动", callback_data: cb.bodyAction("workout") },
+          ],
+        ],
+      },
+    });
     return;
   }
   const suggested = await suggestedWeightGoal(ctx.db, ctx.userId);
@@ -242,7 +257,23 @@ async function bodyCommand(ctx: CommandContext): Promise<void> {
     text: suggested
       ? `这是体重目标？开启体重追踪 · Track this as a weight goal\n🎯 ${suggested}\n在网页的目标页加上身体计划 · Add a body plan to the goal on the web.`
       : "还没有身体计划 · No body plan yet.\n在网页给体重目标加上身体计划，之后这里就有趋势和预计达成日 · Add one to a weight goal on the web.",
+    reply_markup: { inline_keyboard: [[{ text: "🎯 目标 · Goals", url: `${ctx.origin}/goals` }]] },
   });
+}
+
+/** `bd:<code>` — the three logging buttons under /body, each opening the ask that already exists. */
+export async function bodyAction(ctx: CommandContext, action: BodyAction): Promise<string> {
+  if (!(await bodySummary(ctx.db, ctx.userId, ctx.today))) return "没有身体计划 · No body plan";
+  if (action === "weigh") {
+    await askWeight(ctx);
+    return "回复体重就行 · Reply with your weight";
+  }
+  if (action === "meal") {
+    await mealCommand(ctx, "");
+    return "记一餐 · Log a meal";
+  }
+  await workoutCommand(ctx, "");
+  return "记一次运动 · Log a workout";
 }
 
 // ---------- /note ----------

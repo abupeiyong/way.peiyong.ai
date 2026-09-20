@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.ts";
+import type { BodySummary, WeightLog } from "../../shared/types.ts";
+import { useApp } from "../App.tsx";
 
 interface Payload {
   totals: { focus_min: number; recorded_min: number; active_days: number; rescheduled: number };
@@ -8,11 +10,14 @@ interface Payload {
   moods: { date: string; mood: number | null; energy: number | null }[];
   planned: { est: number; act: number };
   goals: { id: number; title: string; progress: number }[];
+  /** The weight tile (PRD-body §10); null when no body plan is attached. */
+  body: { summary: BodySummary; weights: WeightLog[] } | null;
 }
 
 const hrs = (min: number) => (min >= 60 ? `${Math.round((min / 60) * 10) / 10}h` : `${min}m`);
 
 export default function Insights() {
+  const { nav } = useApp();
   const [data, setData] = useState<Payload | null>(null);
   useEffect(() => { api.get<Payload>("/api/insights").then(setData); }, []);
   if (!data) return null;
@@ -40,6 +45,8 @@ export default function Insights() {
       </div>
 
       <div className="insights-grid">
+        {data.body && <WeightTile body={data.body} onOpen={() => nav("/body")} />}
+
         <div className="card">
           <div className="card-label">每周完成 <i>Weekly completion</i></div>
           {data.weeklyCompletion.length === 0 && <p className="empty-note">No scheduled tasks in the last four weeks.</p>}
@@ -120,5 +127,45 @@ export default function Insights() {
         </div>
       </div>
     </>
+  );
+}
+
+/** The weight tile: the sparkline of the last 90 days, with the numbers the Body page and /body quote. */
+function WeightTile({ body, onOpen }: { body: { summary: BodySummary; weights: WeightLog[] }; onOpen: () => void }) {
+  const { summary, weights } = body;
+  const w = 220, h = 44;
+  const day = (d: string) => Math.round(Date.parse(d + "T00:00:00Z") / 86400000);
+  const xs = weights.map((r) => day(r.date));
+  const lo = Math.min(...weights.map((r) => r.kg)), hi = Math.max(...weights.map((r) => r.kg));
+  const span = Math.max(0.4, hi - lo);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const path = weights
+    .map((r, i) => `${i ? "L" : "M"}${(((day(r.date) - x0) / Math.max(1, x1 - x0)) * w).toFixed(1)} ${(((hi - r.kg) / span) * h).toFixed(1)}`)
+    .join(" ");
+
+  return (
+    <div className="card">
+      <div className="card-label">
+        体重 <i>Weight</i>
+        <span className="spacer" />
+        <button className="btn ghost small" onClick={onOpen}>身体 · Body</button>
+      </div>
+      {weights.length < 2 ? (
+        <p className="empty-note">称两次以上，曲线就出来了 · Two weigh-ins are enough to draw the trend.</p>
+      ) : (
+        <>
+          <svg className="sparkline" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img" aria-label="体重 · Weight, last 90 days">
+            <path d={path} fill="none" stroke="var(--ink)" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+          </svg>
+          <div className="bar-row" style={{ borderTop: "1px solid var(--line-soft)", marginTop: 8 }}>
+            <span className="bar-label">{summary.trend === null ? "—" : `${summary.trend.toFixed(1)} kg`}</span>
+            <span className="mini muted" style={{ flex: 1 }}>
+              7 日均 · 7-day trend{summary.remaining_kg !== null && summary.remaining_kg > 0 ? ` · 距目标 ${summary.remaining_kg.toFixed(1)} kg` : ""}
+            </span>
+            <span className="bar-val">{summary.projected_date ?? "—"}</span>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
