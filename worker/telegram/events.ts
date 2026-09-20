@@ -5,7 +5,8 @@
 // Schema (migration 0003): telegram_events(user_id, kind, event, local_date, latency_s, created_at).
 //   kind   → a scheduled kind (morning, review_prompt, weekly_plan, weekly_review, midday_nudge,
 //            area_checkin, block, and the body kinds of PRD-body §6: weigh_in, meal_*, workout_check,
-//            body_nudge, body_recap) or a surface (capture, command, guide, inline, voice, mute, unlink)
+//            body_nudge, body_recap) or a surface (capture, command, guide, inline, voice, photo, mute, unlink).
+//            `photo` also doubles as the daily counter behind the ten meal-photo analyses of PRD-body §12.
 //   event  → sent | replied | blocked | rate_limited | error | used
 
 import type { TelegramStats } from "../../shared/types.ts";

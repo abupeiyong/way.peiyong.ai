@@ -4,6 +4,8 @@
 //   3. pending telegram_state      → that state machine (e.g. an evening review in progress)
 //   4. reply to a Guide message    → Guide, with the thread as context
 //   5. anything else               → capture to the inbox: one round trip, no model call
+// A photo is decided before any of that (PRD-body §5.2): while a meal ask is open, or captioned #meal / 饭,
+// it is a meal; every other photo falls through to the steps below as it always did.
 // The webhook (#6) verifies the update, resolves the Way user once and supplies the
 // handlers; this module only decides which one runs.
 
@@ -28,6 +30,14 @@ export interface TgEntity {
   url?: string;
 }
 
+/** One size of a photo; Telegram sends the same picture in several, smallest first. */
+export interface TgPhotoSize {
+  file_id: string;
+  width: number;
+  height: number;
+  file_size?: number;
+}
+
 /** Where a forwarded message came from (Bot API 7+). */
 export type TgForwardOrigin =
   | { type: "user"; sender_user: TgUser }
@@ -47,6 +57,7 @@ export interface TgMessage {
   caption_entities?: TgEntity[];
   reply_to_message?: TgMessage;
   voice?: { file_id: string; duration: number; mime_type?: string; file_size?: number };
+  photo?: TgPhotoSize[];
   forward_origin?: TgForwardOrigin;
 }
 
@@ -104,11 +115,13 @@ export interface RouteHandlers {
   inlineQuery(query: TgInlineQuery): Promise<void>;
   /** The user picked an inline result (needs inline feedback on in BotFather). */
   chosenInline(chosen: TgChosenInlineResult): Promise<void>;
+  /** A photo. True when it was taken as a meal; false falls through to the steps above. */
+  photo(message: TgMessage, caption: string): Promise<boolean>;
   /** A message with no text (sticker, photo without caption, …). */
   unsupported(message: TgMessage): Promise<void>;
 }
 
-export type RouteKind = "callback" | "inline" | "chosen" | "command" | "state" | "guide" | "capture" | "voice" | "unsupported" | "ignored";
+export type RouteKind = "callback" | "inline" | "chosen" | "command" | "state" | "guide" | "capture" | "voice" | "photo" | "unsupported" | "ignored";
 
 const COMMAND = /^\/([A-Za-z0-9_]{1,32})(?:@[A-Za-z0-9_]+)?(?:\s+([\s\S]*))?$/;
 
@@ -134,6 +147,7 @@ export async function routeUpdate(update: TgUpdate, h: RouteHandlers): Promise<R
   const message = update.message;
   if (!message) return "ignored";
   const text = (message.text ?? message.caption ?? "").trim();
+  if (message.photo?.length && (await h.photo(message, text))) return "photo";
   if (!text) {
     if (message.voice) {
       await h.voice(message);

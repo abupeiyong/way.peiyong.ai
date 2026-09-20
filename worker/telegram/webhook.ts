@@ -7,6 +7,7 @@
 //   resolve     → from.id → telegram_accounts.user_id, once; every handler gets that userId (never chat_id)
 //   unknown     → /start offers to link or to create an account (register.ts); anything else says "link first"
 //   dispatch    → flood guard, then routeUpdate with the handlers below (commands.ts, callback.ts, the state machines)
+//   photo       → a meal photo goes to meal.ts (PRD-body §5.2); every other photo keeps the TEXT_ONLY reply
 //   errors      → logged, and the user gets 出错了，请稍后再试; the response was already a 200
 //
 // Registration (once per bot): wrangler secret put TELEGRAM_WEBHOOK_SECRET, then POST /api/telegram/setup
@@ -29,6 +30,7 @@ import { reviewAnswer } from "./review.ts";
 import {
   captureMessage, floodGuard, parseCommand, routeUpdate, SLOW_DOWN, type Reply, type TgUpdate,
 } from "./router.ts";
+import { mealNumbersAnswer, mealPhoto } from "./meal.ts";
 import { localDate } from "./schedule.ts";
 import { d1StateStore } from "./state.ts";
 import { topThreeAnswer } from "./topthree.ts";
@@ -192,7 +194,8 @@ async function dispatch(
     // Each state machine only takes its own kind, so the order only matters for who looks first.
     pendingState: async (_message, text) =>
       (await reviewAnswer(ctx, text)) || (await topThreeAnswer(ctx, text)) || (await weeklyPlanAnswer(ctx, text))
-      || (await weightAnswer(ctx, text)) || (await workoutAnswer(ctx, text)) || (await goalProgressAnswer(ctx, text))
+      || (await weightAnswer(ctx, text)) || (await workoutAnswer(ctx, text)) || (await mealNumbersAnswer(ctx, text))
+      || (await goalProgressAnswer(ctx, text))
       || (await timezoneAnswer(ctx, text))
       || (await onboardAnswer(ctx, text)),
     guideReply: (message, text) => guideReplyThread(ctx, message, text),
@@ -201,6 +204,8 @@ async function dispatch(
       await logEvent(db, userId, "capture", "used");
     },
     voice: (message) => captureVoice(ctx, message),
+    // A meal photo (PRD-body §5.2); anything else photographic falls through to capture or TEXT_ONLY.
+    photo: (message, caption) => mealPhoto(ctx, message, caption),
     inlineQuery: async () => {},   // handled before dispatch
     chosenInline: async () => {},
     unsupported: () => send(TEXT_ONLY),

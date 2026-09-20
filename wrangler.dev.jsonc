@@ -28,5 +28,7 @@
   "vars": {
     "OPENAI_BASE_URL": "https://api.openai.com/v1",
     "OPENAI_CHAT_MODEL": "gpt-5-nano"
+    // 本地没有 ai 绑定,饭菜照片只有配了 OPENAI_API_KEY + OPENAI_VISION_MODEL 才会分析(PRD-body §5.3)。
+    // "OPENAI_VISION_MODEL": "gpt-5-nano"
   }
 }
