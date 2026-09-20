@@ -60,6 +60,14 @@ export interface TelegramPrefs {
   block_reminders: number;
   /** 0/1: show streaks in the weekly recap. */
   streaks: number;
+  /** The body prompts (PRD-body §6); null = off, and they only apply while a body plan exists. */
+  weigh_at: string | null;
+  breakfast_at: string | null;
+  lunch_at: string | null;
+  dinner_at: string | null;
+  workout_at: string | null;
+  /** 0/1: the conditional body nudge at 12:00 (PRD-body §6.2). */
+  body_nudges: number;
 }
 
 /** GET /api/telegram/stats — this account's delivery and engagement numbers (PRD §14). */
@@ -89,6 +97,8 @@ export interface TelegramSettings {
   timezone: string | null;
   /** The shared bot's @username, without the @; null when Telegram is not configured. */
   bot: string | null;
+  /** A body plan is attached to a goal: the body slots and the nudge toggle apply (PRD-body §10). */
+  body_plan: boolean;
   prefs: TelegramPrefs;
 }
 

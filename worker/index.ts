@@ -20,6 +20,7 @@ import { runSchedules, isDisconnected, localDate, DISCONNECTED_UNTIL } from "./t
 import { ALLOWED_UPDATES, BOT_COMMANDS, sendReply, TelegramApiError, TelegramBot } from "./telegram/api.ts";
 import { describeBrowser, loginUrl, pollLogin, startLoginRequest, LOGIN_TTL_SECONDS } from "./telegram/login.ts";
 import { telegramStats } from "./telegram/events.ts";
+import { loadBodyPlan } from "./body.ts";
 import { d1StateStore } from "./telegram/state.ts";
 import { userToday } from "./telegram/time.ts";
 import { verifyWidgetLogin } from "./telegram/widget.ts";
@@ -311,11 +312,13 @@ app.put("/api/security", async (c) => {
 
 app.get("/api/telegram", async (c) => {
   const userId = c.get("userId");
-  const [account, prefs, user] = await Promise.all([
+  const [account, prefs, user, bodyPlan] = await Promise.all([
     c.env.DB.prepare("SELECT * FROM telegram_accounts WHERE user_id = ?").bind(userId)
       .first<{ username?: string | null; paused_until: string | null }>(),
     c.env.DB.prepare("SELECT * FROM telegram_prefs WHERE user_id = ?").bind(userId).first<Partial<TelegramPrefs>>(),
     c.env.DB.prepare("SELECT timezone FROM users WHERE id = ?").bind(userId).first<{ timezone: string | null }>(),
+    // The body slots and the nudge toggle are only shown once a plan exists (PRD-body §10).
+    loadBodyPlan(c.env.DB, userId),
   ]);
   const telegram: TelegramSettings = {
     linked: !!account,
@@ -323,6 +326,7 @@ app.get("/api/telegram", async (c) => {
     disconnected: isDisconnected(account?.paused_until),
     timezone: user?.timezone ?? null,
     bot: c.env.TELEGRAM_BOT_TOKEN ? c.env.TELEGRAM_BOT_USERNAME?.replace(/^@/, "") || null : null,
+    body_plan: !!bodyPlan,
     prefs: {
       morning_at: prefs?.morning_at ?? null,
       review_at: prefs?.review_at ?? null,
@@ -334,6 +338,12 @@ app.get("/api/telegram", async (c) => {
       nudges: prefs?.nudges ? 1 : 0,
       block_reminders: prefs?.block_reminders ? 1 : 0,
       streaks: prefs?.streaks ? 1 : 0,
+      weigh_at: prefs?.weigh_at ?? null,
+      breakfast_at: prefs?.breakfast_at ?? null,
+      lunch_at: prefs?.lunch_at ?? null,
+      dinner_at: prefs?.dinner_at ?? null,
+      workout_at: prefs?.workout_at ?? null,
+      body_nudges: prefs?.body_nudges ? 1 : 0,
     },
   };
   return c.json({ telegram });

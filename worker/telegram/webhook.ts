@@ -32,6 +32,7 @@ import {
 import { localDate } from "./schedule.ts";
 import { d1StateStore } from "./state.ts";
 import { topThreeAnswer } from "./topthree.ts";
+import { weightAnswer } from "./bodynudge.ts";
 import { weeklyPlanAnswer } from "./weekly.ts";
 
 export interface WebhookEnv extends GuideEnv {
@@ -190,7 +191,8 @@ async function dispatch(
     // Each state machine only takes its own kind, so the order only matters for who looks first.
     pendingState: async (_message, text) =>
       (await reviewAnswer(ctx, text)) || (await topThreeAnswer(ctx, text)) || (await weeklyPlanAnswer(ctx, text))
-      || (await goalProgressAnswer(ctx, text)) || (await timezoneAnswer(ctx, text)) || (await onboardAnswer(ctx, text)),
+      || (await weightAnswer(ctx, text)) || (await goalProgressAnswer(ctx, text)) || (await timezoneAnswer(ctx, text))
+      || (await onboardAnswer(ctx, text)),
     guideReply: (message, text) => guideReplyThread(ctx, message, text),
     capture: async (message, text) => {
       await send(await captureMessage(db, userId, text, message));

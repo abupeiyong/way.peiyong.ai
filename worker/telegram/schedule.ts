@@ -17,13 +17,16 @@
 // Quiet hours suppress every kind here (all scheduled); user-triggered replies never pass through this module.
 //
 // Kinds (PRD §6): morning (brief + the ask) · review_prompt · weekly_plan (Mon) · weekly_review (Sun) ·
-// midday_nudge (11:00, only while the top three is empty) · area_checkin (1st of the month).
+// midday_nudge (11:00, only while the top three is empty) · area_checkin (1st of the month) ·
+// body_nudge (12:00, only when one of the four body rules is true — PRD-body §6.2).
+// The Sunday body recap rides inside weekly_review (weekly.ts), so the week stays one conversation.
 //
 // Scaling: one query per tick is fine into the low hundreds of linked users; past that, precompute
 // next_send_at (UTC) per user per kind and index it.
 
 import { sendReply, sendReplyId, TelegramApiError, TelegramBot } from "./api.ts";
 import { runBlockReminders } from "./blocks.ts";
+import { bodyNudgeDue, sendBodyNudge } from "./bodynudge.ts";
 import { sendCheckin } from "./checkin.ts";
 import { sendMorning } from "./compose.ts";
 import { logEvent } from "./events.ts";
@@ -32,10 +35,12 @@ import { d1StateStore } from "./state.ts";
 import type { TopThreeContext } from "./topthree.ts";
 import { sendWeeklyPlan, sendWeeklyReview } from "./weekly.ts";
 import { localNow, type LocalNow } from "./time.ts";
+import type { GuideEnv } from "../guide.ts";
 
 export { localDate, localNow, localTime, localWeekday, type LocalNow } from "./time.ts";
 
-export interface ScheduleEnv {
+/** The model settings are optional: without them the Sunday recap is its deterministic block alone. */
+export interface ScheduleEnv extends GuideEnv {
   DB: D1Database;
   /** Unset = nothing is sent (housekeeping still runs). */
   TELEGRAM_BOT_TOKEN?: string;
@@ -51,6 +56,8 @@ const MAX_PARTIAL_BACKOFF_MS = 60_000;
 export const DISCONNECTED_UNTIL = "9999-12-31 23:59:59";
 /** The midday nudge's fixed slot (PRD §6 row 5). */
 const NUDGE_AT = "11:00";
+/** The body nudge's fixed slot (PRD-body §6.2): the rules are checked at noon. */
+const BODY_NUDGE_AT = "12:00";
 
 export function isDisconnected(pausedUntil: string | null | undefined): boolean {
   return !!pausedUntil && pausedUntil >= DISCONNECTED_UNTIL;
@@ -85,7 +92,13 @@ export interface Candidate {
   [pref: string]: unknown;
 }
 
-type KindContext = TopThreeContext & { streaks: boolean };
+type KindContext = TopThreeContext & {
+  streaks: boolean;
+  /** Model settings for the one scheduled message that may ask the Guide (the Sunday body recap). */
+  guide: ScheduleEnv;
+  /** Like send, but keeps the Telegram message id, so a Guide reply can be threaded. */
+  sendId(reply: Parameters<TopThreeContext["send"]>[0]): Promise<number>;
+};
 
 interface ScheduleKind {
   /** telegram_outbox_log.kind */
@@ -130,6 +143,8 @@ const KINDS: ScheduleKind[] = [
   { kind: "weekly_review", slot: (p) => p.weekly_review_at, windowMin: 15, cadence: (_, now) => now.weekday === 0, send: sendWeeklyReview },
   { kind: "midday_nudge", slot: (p) => (p.nudges ? NUDGE_AT : null), windowMin: 15, cadence: daily, condition: topThreeEmpty, send: sendNudge },
   { kind: "area_checkin", slot: (p) => p.checkin_at, windowMin: 15, cadence: (_, now) => now.date.endsWith("-01"), send: sendCheckin },
+  // The body nudge sends at most one message a day, and each of its rules at most once a week (bodynudge.ts).
+  { kind: "body_nudge", slot: (p) => (p.body_nudges ? BODY_NUDGE_AT : null), windowMin: 15, cadence: daily, condition: bodyNudgeDue, send: sendBodyNudge },
 ];
 
 /** Kinds due for this user at `now`; the window never wraps past midnight, so a local date never repeats a kind. */
@@ -170,7 +185,8 @@ async function release(db: D1Database, userId: number, kind: string, date: strin
 }
 
 /** Every due kind for one user, in order. Stops at the first 403 (chat gone) or deferral. */
-async function runUser(db: D1Database, bot: TelegramBot, u: Candidate, at: Date, backoff: Backoff): Promise<void> {
+async function runUser(env: ScheduleEnv, bot: TelegramBot, u: Candidate, at: Date, backoff: Backoff): Promise<void> {
+  const db = env.DB;
   let now: LocalNow;
   try {
     now = localNow(u.timezone || "UTC", at);
@@ -185,10 +201,15 @@ async function runUser(db: D1Database, bot: TelegramBot, u: Candidate, at: Date,
     today: now.date,
     state: d1StateStore(db, u.user_id),
     streaks: !!u.streaks,
+    guide: env,
     async send(reply) {
+      await ctx.sendId(reply);
+    },
+    async sendId(reply) {
       await waitOut(backoff, sentInKind > 0);
-      await sendReplyId(bot, u.chat_id, reply);
+      const id = await sendReplyId(bot, u.chat_id, reply);
       sentInKind++;
+      return id;
     },
   };
 
@@ -276,7 +297,7 @@ export async function runSchedules(env: ScheduleEnv, scheduledTime: number): Pro
       while (next < candidates.length) {
         const u = candidates[next++];
         try {
-          await runUser(db, bot, u, at, backoff);
+          await runUser(env, bot, u, at, backoff);
         } catch (e) {
           console.error(`schedule: user ${u.user_id} failed`, e);
         }

@@ -4,7 +4,8 @@
 //
 // Schema (migration 0003): telegram_events(user_id, kind, event, local_date, latency_s, created_at).
 //   kind   → a scheduled kind (morning, review_prompt, weekly_plan, weekly_review, midday_nudge,
-//            area_checkin, block) or a surface (capture, command, guide, inline, voice, mute, unlink)
+//            area_checkin, block, and the body kinds of PRD-body §6: weigh_in, meal_*, workout_check,
+//            body_nudge, body_recap) or a surface (capture, command, guide, inline, voice, mute, unlink)
 //   event  → sent | replied | blocked | rate_limited | error | used
 
 import type { TelegramStats } from "../../shared/types.ts";
@@ -54,7 +55,8 @@ export async function telegramStats(db: D1Database, userId: number, today: strin
             SUM(CASE WHEN event = 'sent' THEN 1 ELSE 0 END) AS sent,
             SUM(CASE WHEN event = 'replied' THEN 1 ELSE 0 END) AS replied
        FROM telegram_events WHERE user_id = ? AND created_at >= ${since}
-        AND kind IN ('morning','review_prompt','weekly_plan','weekly_review','midday_nudge','area_checkin','block')
+        AND kind IN ('morning','review_prompt','weekly_plan','weekly_review','midday_nudge','area_checkin','block',
+                     'weigh_in','meal_breakfast','meal_lunch','meal_dinner','workout_check','body_nudge','body_recap')
       GROUP BY kind ORDER BY kind`
   ).bind(userId).all<{ kind: string; sent: number; replied: number }>();
 

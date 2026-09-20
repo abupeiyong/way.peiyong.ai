@@ -7,6 +7,7 @@
 // path as the Guide card. The ask waits 6 h in telegram_state; later text falls through to inbox capture.
 
 import { applyProposal } from "../proposals.ts";
+import { sendBodyRecap, type BodyRecapContext } from "./bodynudge.ts";
 import { dailyReviewStreak } from "../reviews.ts";
 import { weekStartOf } from "../dates.ts";
 import { guideChat } from "../guide.ts";
@@ -146,8 +147,12 @@ export async function weeklyPlanAnswer(ctx: WeeklyContext, text: string): Promis
   return true;
 }
 
-/** Sunday's message: the recap (with the streak when opted in), then the weekly review. */
-export async function sendWeeklyReview(ctx: WeeklyContext & { streaks?: boolean }): Promise<void> {
+/**
+ * Sunday's message: the recap (with the streak when opted in), the body recap when a plan exists
+ * (PRD-body §8.2), then the weekly review. A body recap that fails is logged and skipped — the
+ * week's questions matter more than its numbers.
+ */
+export async function sendWeeklyReview(ctx: WeeklyContext & { streaks?: boolean } & Partial<BodyRecapContext>): Promise<void> {
   const weekStart = weekStartOf(ctx.today);
   const streak = ctx.streaks ? await dailyReviewStreak(ctx.db, ctx.userId, ctx.today) : 0;
   const plan = await loadPlan(ctx, weekStart);
@@ -158,6 +163,11 @@ export async function sendWeeklyReview(ctx: WeeklyContext & { streaks?: boolean 
     ...(streak > 1 ? ["", `🔥 连续 ${streak} 天复盘 · ${streak}-day review streak`] : []),
   ];
   await ctx.send({ text: head.join("\n") });
+  try {
+    await sendBodyRecap(ctx);
+  } catch (e) {
+    console.error("telegram weekly review: body recap failed", e);
+  }
   await startReview(ctx, "weekly");
 }
 

@@ -18,6 +18,7 @@ import { loginDecide } from "./login.ts";
 import { directionSkip, timezonePick } from "./register.ts";
 import { muteFor, settingsToggle, unlinkConfirm } from "./account.ts";
 import { proposalAnswer, taskAskGuide } from "./guide.ts";
+import { bodyNudgeAction, type BodyNudgeRule } from "./bodynudge.ts";
 import type { Reply } from "./router.ts";
 import type { TelegramStateStore } from "./state.ts";
 
@@ -39,6 +40,9 @@ const BLOCK_CODES = { done: "d", snooze: "z", tomorrow: "t" } as const satisfies
 
 export type SettingsToggle = "nudges" | "block_reminders" | "streaks";
 const SETTINGS_CODES = { nudges: "n", block_reminders: "b", streaks: "s" } as const satisfies Record<SettingsToggle, string>;
+
+/** The body nudge rules of PRD-body §6.2; the tapped rule decides what the button does. */
+const BODY_NUDGE_CODES = { weigh: "w", workout: "o", trend: "t", kcal: "k" } as const satisfies Record<BodyNudgeRule, string>;
 
 export type MuteSpan = "today" | "week" | "off";
 const MUTE_CODES = { today: "t", week: "w", off: "o" } as const satisfies Record<MuteSpan, string>;
@@ -83,6 +87,7 @@ type DirectionSkip = "dr:s";
 type ProposalAnswer<MsgId extends Num, Idx extends Num> = `pr:${MsgId}:${Idx}:${"y" | "n"}`;
 /** "Send me today's brief" on the link welcome (link.ts). */
 type Brief = "br";
+type BodyNudge = `bn:${(typeof BODY_NUDGE_CODES)[BodyNudgeRule]}`;
 
 export type Callback =
   | { verb: "task_done"; taskId: number }
@@ -116,7 +121,8 @@ export type Callback =
   | { verb: "unlink" }
   | { verb: "direction_skip" }
   | { verb: "proposal"; msgId: number; idx: number; approve: boolean }
-  | { verb: "brief" };
+  | { verb: "brief" }
+  | { verb: "body_nudge"; rule: BodyNudgeRule };
 
 // Numeric bounds; the build-time assertion below is checked against their widest values.
 const MAX_OFFSET_DAYS = 365;
@@ -132,7 +138,7 @@ type Widest =
   | ReviewStep | ReviewSkip<"9"> | ReviewFocus<"2026-12-31"> | Carry<"2026-12-31"> | TopThree<"2026-12-31">
   | TopDone<"3", "2026-12-31"> | GoalProgress<MaxId, "100"> | GoalAct<MaxId> | GoalList | Weekly<"2026-12-31">
   | Block<MaxId> | Checkin<MaxId, "10"> | Login<MaxId> | Register | TimezonePick<"30"> | Settings | Mute | Unlink
-  | DirectionSkip | ProposalAnswer<MaxId, "99"> | Brief;
+  | DirectionSkip | ProposalAnswer<MaxId, "99"> | Brief | BodyNudge;
 type Budget<N extends number, T extends 0[] = []> = T["length"] extends N ? T : Budget<N, [...T, 0]>;
 type Fits<S extends string, B extends 0[]> = S extends `${infer _}${infer Rest}`
   ? B extends [0, ...infer Left extends 0[]] ? Fits<Rest, Left> : false
@@ -270,6 +276,10 @@ export function parseCallback(data: string): Callback | null {
     }
     case "br":
       return p.length === 1 ? { verb: "brief" } : null;
+    case "bn": {
+      const rule = codeOf<BodyNudgeRule>(BODY_NUDGE_CODES, p[1]);
+      return p.length === 2 && rule ? { verb: "body_nudge", rule } : null;
+    }
   }
   return null;
 }
@@ -321,6 +331,7 @@ export const cb = {
   proposal: (msgId: number, idx: number, approve: boolean): ProposalAnswer<number, number> =>
     checked(`pr:${msgId}:${idx}:${approve ? "y" : "n"}` as const),
   brief: (): Brief => checked("br"),
+  bodyNudge: (rule: BodyNudgeRule): BodyNudge => checked(`bn:${BODY_NUDGE_CODES[rule]}` as const),
 };
 
 // ---------- handlers ----------
@@ -408,6 +419,7 @@ async function dispatch(ctx: CallbackContext, p: Callback): Promise<string | und
     case "direction_skip": return directionSkip(ctx);
     case "proposal": return proposalAnswer(ctx, p.msgId, p.idx, p.approve);
     case "brief": return brief(ctx);
+    case "body_nudge": return bodyNudgeAction(ctx, p.rule);
   }
 }
 
