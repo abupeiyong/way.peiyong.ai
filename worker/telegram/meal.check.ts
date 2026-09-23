@@ -7,7 +7,7 @@
 import { cb, parseCallback, type Callback } from "./callback.ts";
 import {
   MEAL_CAPTION_RE, largestPhoto, mealKindAt, mealKindFromWord, parseMealEstimate, parseMealNumbers,
-  dishLine, splitMealArgs,
+  dishLine, reanalyzeMeal, splitMealArgs, type MealReanalyzeContext, type MealRow,
 } from "./meal.ts";
 
 function check(ok: boolean, what: string): void {
@@ -111,5 +111,47 @@ check(same(parseMealNumbers("620/32"), { kcal: 620, protein_g: 32 }), "620/32");
 check(same(parseMealNumbers(" 620 kcal 32g "), { kcal: 620, protein_g: 32 }), "620 kcal 32g");
 check(parseMealNumbers("大概挺多的") === null, "free text is not an answer — it captures as usual");
 check(parseMealNumbers("99999") === null, "an impossible calorie count is not an answer");
+
+// ---------- 🔄 重新分析 / POST /api/body/meal/:id/reanalyze (§13 item 12) ----------
+// Only the guards are checked here: past them the function calls a model, which this file never does.
+
+const MEAL: MealRow = {
+  id: 7, date: "2026-09-20", time_min: 12 * 60, kind: "lunch", description: "牛肉面",
+  kcal: 620, protein_g: 32, user_edited: 0, confidence: "medium", tg_file_id: "AgACAgQ",
+};
+
+/** Every guard below is reached before D1 or the Bot API is touched, so both blow up if one is not. */
+function forbidden<T>(what: string): T {
+  return new Proxy({}, { get() { throw new Error(`FAIL: ${what} was used`); } }) as T;
+}
+
+function ctx(over: Partial<MealReanalyzeContext> = {}): MealReanalyzeContext {
+  return {
+    db: forbidden<D1Database>("the database"), userId: 1, today: "2026-09-20",
+    guide: { AI: {} as Ai }, bot: forbidden<MealReanalyzeContext["bot"]>("the Bot API"), ...over,
+  };
+}
+
+/** Answers the one statement the analysis counter makes. */
+function countingDb(n: number): D1Database {
+  return {
+    prepare() {
+      return { bind() { return { async first() { return { n }; } }; } };
+    },
+  } as unknown as D1Database;
+}
+
+check((await reanalyzeMeal(ctx(), { ...MEAL, tg_file_id: null })).status === "no_photo",
+  "a meal with no photo has nothing to re-read");
+check((await reanalyzeMeal(ctx(), { ...MEAL, user_edited: 1 })).status === "user_edited",
+  "your own numbers are never overwritten by a re-read");
+check((await reanalyzeMeal(ctx({ guide: {} }), MEAL)).status === "no_model",
+  "a deployment with no vision model says so instead of guessing");
+check((await reanalyzeMeal(ctx({ db: countingDb(10) }), MEAL)).status === "limit",
+  "a re-read counts against the day's ten analyses");
+
+const kept = await reanalyzeMeal(ctx(), { ...MEAL, user_edited: 1 });
+check(kept.row.kcal === 620 && kept.row.user_edited === 1 && !!kept.note,
+  "the refused row comes back untouched, with the line that explains why");
 
 console.log("all checks passed");

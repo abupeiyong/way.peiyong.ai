@@ -14,7 +14,12 @@
 //   JSON          → the strict shape of §5.3; a parse failure keeps the dishes the model could name and
 //                   drops every number, and `confidence: low` adds 看不太清
 //   ml:<id>:…     → ✓ 记下 · ✏️ 改数字 (a ForceReply for `kcal[/protein]`, user_edited = 1) · 🗑 不记 ·
-//                   估算 (the same JSON from a text-only prompt, for a meal that has no numbers yet)
+//                   估算 (the same JSON from a text-only prompt, for a meal that has no numbers yet) ·
+//                   🔄 重新分析 (reanalyzeMeal: the same photo read again by whatever vision model is
+//                   configured now; POST /api/body/meal/:id/reanalyze runs the very same function, §13
+//                   item 12, so the card and the web can never disagree about what a re-read does)
+//   dish notes    → the numbers ✏️ 改数字 leaves on a one-dish meal are remembered per user and replace
+//                   the model's the next time that dish is estimated, on every path above (§13 item 12)
 //   ml:s|n:…      → 跳过 (nothing written; the day's outbox claim keeps the ask from repeating) · 没吃
 //                   (an empty row for that meal, so the condition below reads it as answered)
 //
@@ -343,7 +348,7 @@ export async function analyzeText(env: GuideEnv, description: string): Promise<s
 
 // ---------- the row ----------
 
-interface MealRow {
+export interface MealRow {
   id: number;
   date: string;
   time_min: number | null;
@@ -388,7 +393,7 @@ async function insertMeal(db: D1Database, userId: number, m: MealWrite): Promise
   }
 }
 
-async function loadMeal(db: D1Database, userId: number, id: number): Promise<MealRow | null> {
+export async function loadMeal(db: D1Database, userId: number, id: number): Promise<MealRow | null> {
   try {
     return await db.prepare(
       `SELECT ${MEAL_COLUMNS} FROM meal_logs WHERE id = ? AND user_id = ?`
@@ -694,7 +699,7 @@ export async function mealPhoto(ctx: MealPhotoContext, message: TgMessage, capti
 }
 
 /** Download into memory and ask the model; null on any failure along the way. */
-async function readPhoto(ctx: MealPhotoContext, fileId: string): Promise<string | null> {
+async function readPhoto(ctx: Pick<CallbackContext, "guide" | "bot">, fileId: string): Promise<string | null> {
   try {
     const file = await ctx.bot.getFile(fileId);
     if (!file.ok || !file.result.file_path) return null;
@@ -767,41 +772,61 @@ export async function mealButton(ctx: CallbackContext, mealId: number, action: M
   }
 }
 
+/** Why a re-read did or did not happen (§13 item 12); the card and `POST /api/body/meal/:id/reanalyze` share it. */
+export type MealReanalysisStatus = "ok" | "no_photo" | "user_edited" | "no_model" | "limit" | "unreadable";
+
+export interface MealReanalysis {
+  status: MealReanalysisStatus;
+  /** The meal as it stands afterwards; the row untouched unless `status` is "ok". */
+  row: MealRow;
+  /** The dishes whose numbers came from a correction of the user's, for `dishNoteLine`. */
+  used: string[];
+  /** The one line that explains the outcome; absent when there is nothing to add. */
+  note?: string;
+}
+
+/** Everything a re-read needs: the row's owner, the day's analysis budget, the models and the Bot API. */
+export type MealReanalyzeContext =
+  Pick<CallbackContext, "db" | "userId" | "today" | "guide" | "bot"> & { typing?: () => Promise<void> };
+
 /**
- * `🔄 重新分析` (§13 item 12): read the same photo again with whatever vision model is configured now,
- * and redraw the card. Numbers the user typed themselves are never overwritten, and the re-read counts
- * against the day's ten analyses like any other.
+ * Read the same photo again with whatever vision model is configured now (§13 item 12). Telegram keeps
+ * the file behind `tg_file_id` alive, so nothing had to be stored for this. Numbers the user typed
+ * themselves are never overwritten — the re-read is refused instead — and a re-read counts against the
+ * day's ten analyses like any other.
  */
-async function mealReanalyze(ctx: CallbackContext, row: MealRow): Promise<string> {
-  if (!row.tg_file_id) return NO_PHOTO_NOTE;
-  if (row.user_edited) {
-    await ctx.edit(mealCard(row, EDITED_NOTE));
-    return "你改过数字了 · Your own numbers";
-  }
-  if (!hasVisionModel(ctx.guide)) {
-    await ctx.edit(mealCard(row, NO_VISION_NOTE));
-    return NO_VISION_NOTE;
-  }
+export async function reanalyzeMeal(ctx: MealReanalyzeContext, row: MealRow): Promise<MealReanalysis> {
+  if (!row.tg_file_id) return { status: "no_photo", row, used: [], note: NO_PHOTO_NOTE };
+  if (row.user_edited) return { status: "user_edited", row, used: [], note: EDITED_NOTE };
+  if (!hasVisionModel(ctx.guide)) return { status: "no_model", row, used: [], note: NO_VISION_NOTE };
   if ((await analysesToday(ctx.db, ctx.userId, ctx.today)) >= PHOTO_ANALYSES_PER_DAY) {
-    await ctx.edit(mealCard(row, LIMIT_NOTE));
-    return LIMIT_NOTE;
+    return { status: "limit", row, used: [], note: LIMIT_NOTE };
   }
   await logEvent(ctx.db, ctx.userId, "photo", "used", { local_date: ctx.today });
-  await ctx.typing();
+  await ctx.typing?.();
   const raw = await readPhoto(ctx, row.tg_file_id);
   const parsed = raw === null ? null : parseMealEstimate(raw);
   if (!parsed) {
     await logEvent(ctx.db, ctx.userId, "photo", "error", { local_date: ctx.today });
-    await ctx.edit(mealCard(row, UNREADABLE_NOTE));
-    return UNREADABLE_NOTE;
+    return { status: "unreadable", row, used: [], note: UNREADABLE_NOTE };
   }
   const { estimate, used } = await applyDishNotes(ctx.db, ctx.userId, parsed);
   const updated = await setMealNumbers(ctx, row.id, estimate.total_kcal, estimate.total_protein_g, {
     confidence: estimate.confidence, userEdited: false, description: dishLine(estimate) || row.description,
     aiJson: raw ?? undefined,
   });
-  await ctx.edit(mealCard(updated ?? row, used.length ? dishNoteLine(used) : undefined));
-  return "已重新分析 · Re-analysed";
+  return { status: "ok", row: updated ?? row, used, note: used.length ? dishNoteLine(used) : undefined };
+}
+
+/** `🔄 重新分析`: the re-read above, then the card redrawn with whatever it has to say. */
+async function mealReanalyze(ctx: CallbackContext, row: MealRow): Promise<string> {
+  const result = await reanalyzeMeal(ctx, row);
+  // Nothing to redraw when there was never a photo: the card is already right.
+  if (result.status === "no_photo") return NO_PHOTO_NOTE;
+  await ctx.edit(mealCard(result.row, result.note));
+  if (result.status === "ok") return "已重新分析 · Re-analysed";
+  if (result.status === "user_edited") return "你改过数字了 · Your own numbers";
+  return result.note ?? UNREADABLE_NOTE;
 }
 
 async function setMealNumbers(
