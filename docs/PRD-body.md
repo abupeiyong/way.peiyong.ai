@@ -382,7 +382,9 @@ message shows a trend, a rate and a projected date that match the numbers on the
 
 ### P2 — smarter, quieter
 10. Adaptive prompt times (learn from when the user actually logs; propose, don't change).
-11. Monthly body report (weight, workouts, calories, the month's best week) as a message and a Body-page section.
+11. Monthly body report (weight trend to trend, workouts and minutes, average logged calories, the
+    month's best week, and the projected date then vs now) as a message on the 1st and a Body-page
+    section with month navigation.
 12. Re-analysis of past photos when a better vision model is configured; per-dish corrections that improve later estimates ("my 牛肉面 is ~550 kcal").
 
 ---
