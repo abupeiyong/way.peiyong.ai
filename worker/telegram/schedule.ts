@@ -25,8 +25,9 @@
 // workout_check (telegram_prefs.workout_at, only with a body plan and nothing logged today — PRD-body §5.4) ·
 // body_nudge (12:00, only when one of the four body rules is true — PRD-body §6.2) ·
 // body_month (telegram_prefs.body_month_at, the 1st of the month: last month's body numbers — PRD-body §13) ·
-// body_adapt (Monday 09:30, only when one of the body asks is at least half an hour off the time the user
-// actually logs at; it proposes, it never changes a slot — PRD-body §13).
+// body_adapt (Monday 09:30, only when one of the body asks has been at least 45 minutes off the time the
+// user actually logs at for two weeks running, or has gone unanswered on 80 % of the days it was sent over
+// three weeks; it proposes, it never changes or clears a slot — PRD-body §13, §15 q3).
 // The Sunday body recap rides inside weekly_review (weekly.ts), so the week stays one conversation.
 //
 // Scaling: one query per tick is fine into the low hundreds of linked users; past that, precompute

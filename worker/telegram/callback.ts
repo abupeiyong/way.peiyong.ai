@@ -68,7 +68,7 @@ const WORKOUT_CODES = { run: "r", strength: "s", walk: "w", other: "o", rest: "x
  */
 const MEAL_CODES = { confirm: "y", edit: "e", discard: "x", estimate: "g", reanalyze: "r" } as const satisfies Record<MealAction, string>;
 
-/** The adaptive-time suggestion (PRD-body §13 item 10); `ad:x` leaves the slot alone. */
+/** The adaptive-time suggestion (PRD-body §13 item 10); `ad:x` leaves the slot alone, `ad:f:<slot>` turns it off. */
 const ADAPT_CODES = { weigh: "w", breakfast: "b", lunch: "l", dinner: "d", workout: "o" } as const satisfies Record<AdaptSlot, string>;
 
 /** The meal ask's own buttons (PRD-body §5.2); they carry the meal and the date, never a row id. */
@@ -134,7 +134,11 @@ type Meal<Id extends Num> = `ml:${Id}:${(typeof MEAL_CODES)[MealAction]}`;
 type MealPrompt<Date extends string> =
   `ml:${(typeof MEAL_PROMPT_CODES)[MealPromptAction]}:${(typeof MEAL_KIND_CODES)[MealKind]}:${Date}`;
 /** `ad:l:1340` — the slot and the new time as four digits, since ':' is the separator. */
-type Adapt<Time extends string> = `ad:${(typeof ADAPT_CODES)[AdaptSlot]}:${Time}` | "ad:x";
+type Adapt<Time extends string> =
+  | `ad:${(typeof ADAPT_CODES)[AdaptSlot]}:${Time}`
+  /** `ad:f:l` — turn that ask off altogether (the §15 q3 rule); 'f' is no slot's code, so it cannot collide. */
+  | `ad:f:${(typeof ADAPT_CODES)[AdaptSlot]}`
+  | "ad:x";
 
 export type Callback =
   | { verb: "task_done"; taskId: number }
@@ -176,8 +180,8 @@ export type Callback =
   | { verb: "workout_task"; taskId: number; min: number }
   | { verb: "meal"; mealId: number; action: MealAction }
   | { verb: "meal_prompt"; action: MealPromptAction; meal: MealKind; date: string }
-  /** slot and time are null on `ad:x` — the suggestion was turned down. */
-  | { verb: "adapt"; slot: AdaptSlot | null; time: string | null }
+  /** slot and time are null on `ad:x` — the suggestion was turned down. `off` is the `ad:f:<slot>` form. */
+  | { verb: "adapt"; slot: AdaptSlot | null; time: string | null; off?: true }
   | { verb: "stream_value"; streamId: number; value: number }
   | { verb: "stream_skip"; streamId: number }
   | { verb: "obs_undo"; obsId: number }
@@ -394,6 +398,10 @@ export function parseCallback(data: string): Callback | null {
     }
     case "ad": {
       if (p.length === 2 && p[1] === "x") return { verb: "adapt", slot: null, time: null };
+      if (p.length === 3 && p[1] === "f") {
+        const off = codeOf<AdaptSlot>(ADAPT_CODES, p[2]);
+        return off ? { verb: "adapt", slot: off, time: null, off: true } : null;
+      }
       const slot = codeOf<AdaptSlot>(ADAPT_CODES, p[1]);
       const t = p[2] && /^\d{4}$/.test(p[2]) ? p[2] : null;
       if (p.length !== 3 || !slot || t === null) return null;
@@ -461,6 +469,7 @@ export const cb = {
     checked(`ml:${MEAL_PROMPT_CODES[action]}:${MEAL_KIND_CODES[meal]}:${date}` as const),
   adapt: (slot: AdaptSlot, time: string): Adapt<string> =>
     checked(`ad:${ADAPT_CODES[slot]}:${time.replace(":", "")}` as const),
+  adaptOff: (slot: AdaptSlot): Adapt<string> => checked(`ad:f:${ADAPT_CODES[slot]}` as const),
   adaptKeep: (): "ad:x" => checked("ad:x"),
   streamValue: (streamId: number, value: number): StreamValue<number, number> => checked(`sv:${streamId}:${value}` as const),
   streamSkip: (streamId: number): StreamSkip<number> => checked(`sv:${streamId}:x` as const),
@@ -562,7 +571,7 @@ async function dispatch(ctx: CallbackContext, p: Callback): Promise<string | und
     case "workout_task": return workoutFromTask(ctx, p.taskId, p.min);
     case "meal": return mealButton(ctx, p.mealId, p.action);
     case "meal_prompt": return mealPromptButton(ctx, p.action, p.meal, p.date);
-    case "adapt": return adaptButton(ctx, p.slot, p.time);
+    case "adapt": return adaptButton(ctx, p.slot, p.time, p.off ?? false);
     case "stream_value": return streamValueButton(ctx, p.streamId, p.value);
     case "stream_skip": return streamSkipButton(ctx, p.streamId);
     case "obs_undo": return obsUndoButton(ctx, p.obsId);

@@ -4,7 +4,8 @@
 // Importing callback.ts also loads the whole telegram module graph, so this is a cycle check too.
 
 import { cb, parseCallback, type Callback } from "./callback.ts";
-import { hhmm, medianMinutes, localMinutesOf, slotMinutes } from "./adapt.ts";
+import { driftOf, hhmm, medianMinutes, localMinutesOf, slotMinutes, type Sample } from "./adapt.ts";
+import { addDays } from "../dates.ts";
 import { dishesOf, normalizeDish } from "./meal.ts";
 import { reportedMonth } from "./bodymonth.ts";
 
@@ -26,10 +27,13 @@ function parsesBackTo(data: string, want: Callback, what: string): void {
 parsesBackTo(cb.adapt("lunch", "13:40"), { verb: "adapt", slot: "lunch", time: "13:40" }, "ad:l:1340 round-trips");
 parsesBackTo(cb.adapt("weigh", "07:05"), { verb: "adapt", slot: "weigh", time: "07:05" }, "a leading zero survives");
 parsesBackTo(cb.adaptKeep(), { verb: "adapt", slot: null, time: null }, "ad:x round-trips");
+parsesBackTo(cb.adaptOff("breakfast"), { verb: "adapt", slot: "breakfast", time: null, off: true }, "ad:f:b round-trips");
 check(parseCallback("ad:l:2400") === null, "hour 24 is refused");
 check(parseCallback("ad:l:1360") === null, "minute 60 is refused");
 check(parseCallback("ad:q:1300") === null, "an unknown slot is refused");
 check(parseCallback("ad:l") === null, "a slot with no time is refused");
+check(parseCallback("ad:f:q") === null, "ad:f with an unknown slot is refused");
+check(parseCallback("ad:f") === null, "ad:f with no slot is refused");
 
 // ---------- the times ----------
 
@@ -44,6 +48,41 @@ check(hhmm(0) === "00:00" && hhmm(1439) === "23:55", "the ends stay inside the d
 check(localMinutesOf("2026-09-20 07:12:00", "UTC") === 7 * 60 + 12, "a stored UTC timestamp reads as local minutes");
 check(localMinutesOf("2026-09-20 07:12:00", "Asia/Dubai") === 11 * 60 + 12, "the user's zone shifts it");
 check(localMinutesOf("not a time", "UTC") === null, "an unparseable timestamp is not a sample");
+
+// ---------- the drift, two weeks running (issue #65) ----------
+
+const TODAY = "2026-09-20";
+/** `days` days of one log a day, all at the same local minute. */
+function daily(minutes: number, days: number[]): Sample[] {
+  return days.map((d) => ({ date: addDays(TODAY, -d), minutes }));
+}
+const range = (from: number, to: number): number[] =>
+  Array.from({ length: to - from + 1 }, (_, i) => from + i);
+
+const LUNCH_ASK = 13 * 60;          // 13:00
+const LUNCH_ACTUAL = 12 * 60 + 15;  // 12:15 — exactly 45 minutes early
+
+const oneWeek = daily(LUNCH_ACTUAL, range(0, 6));
+const twoWeeks = daily(LUNCH_ACTUAL, range(0, 13));
+
+check(driftOf(oneWeek, LUNCH_ASK, TODAY) === null, "one week of 12:15 lunches is not yet a drift");
+check(
+  same(driftOf(twoWeeks, LUNCH_ASK, TODAY), { median: LUNCH_ACTUAL, count: 14 }),
+  "two weeks running of 12:15 lunches offers 12:15",
+);
+check(driftOf(daily(12 * 60 + 30, range(0, 13)), LUNCH_ASK, TODAY) === null, "half an hour off is left alone");
+check(
+  driftOf(daily(LUNCH_ACTUAL, [0, 1, 2, 3, 12, 13]), LUNCH_ASK, TODAY) === null,
+  "fewer than five logs in the earlier window is not two weeks running",
+);
+check(
+  driftOf(
+    [...daily(12 * 60, range(0, 6)), ...daily(12 * 60, range(0, 6)), ...daily(12 * 60, range(0, 6)),
+     ...daily(14 * 60, range(7, 20))],
+    LUNCH_ASK, TODAY,
+  ) === null,
+  "a week that swung the other way is not a drift",
+);
 
 // ---------- the month the report covers ----------
 
