@@ -370,6 +370,11 @@ export interface BodyMonthReport {
   end_trend: number | null;
   /** end_trend − start_trend; null when either is missing. */
   change_kg: number | null;
+  /** The projected target date as it stood at each end of the window — the projection then vs now. */
+  start_projected: string | null;
+  end_projected: string | null;
+  /** end_projected − start_projected in days; negative = the target moved closer. Null when either is missing. */
+  projected_shift_days: number | null;
   weigh_ins: number;
   workouts: number;
   minutes: number;

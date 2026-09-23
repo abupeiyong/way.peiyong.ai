@@ -124,6 +124,45 @@ function trendOf(weights: { date: string; kg: number }[], date: string): number 
   return inWindow.reduce((s, w) => s + w.kg, 0) / inWindow.length;
 }
 
+/** Where the plan stood on one day: the raw trend, the weekly rate and the date the target follows from. */
+interface Projection {
+  /** Unrounded — the caller rounds what it publishes. */
+  trend: number | null;
+  rate_kg_per_week: number | null;
+  remaining_kg: number | null;
+  /** Positive = the rate is closing the gap; null when there is no fit. */
+  toward: number | null;
+  projected_date: string | null;
+}
+
+/**
+ * The projection as it stood on `date`, from the weigh-ins up to that day (PRD-body §8.1). bodySummary
+ * states it for today; bodyMonthReport states it at both ends of a month, so "the projection then vs
+ * now" is the same arithmetic run twice rather than a second, divergent formula.
+ * `weights` must reach back FIT_WINDOW + TREND_WINDOW days before `date` for the fit to be complete.
+ */
+function projectAt(weights: { date: string; kg: number }[], plan: BodyPlan, date: string): Projection {
+  const trend = trendOf(weights, date);
+  const fitFrom = addDays(date, -(FIT_WINDOW - 1));
+  const fitPoints = weights
+    .filter((w) => w.date >= fitFrom && w.date <= date)
+    .map((w) => ({ x: dayNumber(w.date), y: trendOf(weights, w.date) }))
+    .filter((p): p is { x: number; y: number } => p.y !== null);
+  const rate = fitPoints.length >= MIN_FIT_READINGS ? slope(fitPoints) : null;
+  const rateWeekly = rate === null ? null : Math.round(rate * 7 * 100) / 100;
+
+  const gaining = plan.target_kg > plan.start_kg;
+  // Kilograms still to go, and the weekly movement toward the target (positive = closing the gap).
+  const remaining = trend === null ? null : Math.round((gaining ? plan.target_kg - trend : trend - plan.target_kg) * 10) / 10;
+  const toward = rateWeekly === null ? null : gaining ? rateWeekly : -rateWeekly;
+
+  let projected: string | null = null;
+  if (remaining !== null && remaining <= 0) projected = date;
+  else if (remaining !== null && toward !== null && toward > FLAT) projected = addDays(date, Math.ceil((remaining / toward) * 7));
+
+  return { trend, rate_kg_per_week: rateWeekly, remaining_kg: remaining, toward, projected_date: projected };
+}
+
 /**
  * The 7-day trend on each of `dates`, rounded like bodySummary's, from one read of the weigh-ins.
  * The nudge rules and the Sunday recap compare the trend a week and a month back (PRD-body §6.2, §8.2).
@@ -217,27 +256,9 @@ export async function bodySummary(db: D1Database, userId: number, today: string)
     // 0004 not applied: the plan could not have been created either, but stay quiet rather than throw.
   }
 
-  const trendAt = (date: string): number | null => trendOf(weights, date);
-
-  const trend = trendAt(today);
-  const trendPrev = trendAt(addDays(today, -TREND_WINDOW));
-
-  const fitFrom = addDays(today, -(FIT_WINDOW - 1));
-  const fitPoints = weights
-    .filter((w) => w.date >= fitFrom)
-    .map((w) => ({ x: dayNumber(w.date), y: trendAt(w.date) }))
-    .filter((p): p is { x: number; y: number } => p.y !== null);
-  const rate = fitPoints.length >= MIN_FIT_READINGS ? slope(fitPoints) : null;
-  const rateWeekly = rate === null ? null : Math.round(rate * 7 * 100) / 100;
-
-  const gaining = plan.target_kg > plan.start_kg;
-  // Kilograms still to go, and the weekly movement toward the target (positive = closing the gap).
-  const remaining = trend === null ? null : Math.round((gaining ? plan.target_kg - trend : trend - plan.target_kg) * 10) / 10;
-  const toward = rateWeekly === null ? null : gaining ? rateWeekly : -rateWeekly;
-
-  let projected: string | null = null;
-  if (remaining !== null && remaining <= 0) projected = today;
-  else if (remaining !== null && toward !== null && toward > FLAT) projected = addDays(today, Math.ceil((remaining / toward) * 7));
+  const trendPrev = trendOf(weights, addDays(today, -TREND_WINDOW));
+  const { trend, rate_kg_per_week: rateWeekly, remaining_kg: remaining, toward, projected_date: projected } =
+    projectAt(weights, plan, today);
 
   let verdict: BodyVerdict;
   if (trend === null) verdict = "no_data";
@@ -302,10 +323,14 @@ export function monthEndOf(date: string): string {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
 }
 
+/** The whole weigh-in history a month's projections need: 28 days of fit, each needing 7 days of trend. */
+const MONTH_LOOKBACK = FIT_WINDOW + TREND_WINDOW - 2;
+
 /**
  * One calendar month of body logs (PRD-body §13 item 11). Deterministic like bodySummary: the trend at
- * each end of the month, what was logged inside it, and the week whose trend moved furthest toward the
- * target. `month` is any date in the month; the window stops at `today`, so the running month is honest.
+ * each end of the month, the projected target date at each end (the projection then vs now), what was
+ * logged inside it, and the week whose trend moved furthest toward the target. `month` is any date in
+ * the month; the window stops at `today`, so the running month is honest.
  * Null when there is no plan — there is nothing to be a month of.
  */
 export async function bodyMonthReport(
@@ -323,9 +348,9 @@ export async function bodyMonthReport(
   let meals: { date: string; description: string; kcal: number | null }[] = [];
   try {
     const [w, o, m] = await Promise.all([
-      // The trend at `from` needs the six days before it as well.
+      // The trend at `from` needs the six days before it; the projection there needs the whole fit window.
       db.prepare("SELECT date, kg, source, note FROM weight_logs WHERE user_id = ? AND date BETWEEN ? AND ? ORDER BY date")
-        .bind(userId, addDays(from, -(TREND_WINDOW - 1)), to).all<WeightLog>(),
+        .bind(userId, addDays(from, -MONTH_LOOKBACK), to).all<WeightLog>(),
       db.prepare("SELECT date, minutes FROM workout_logs WHERE user_id = ? AND date BETWEEN ? AND ?")
         .bind(userId, from, to).all<{ date: string; minutes: number }>(),
       db.prepare("SELECT date, description, kcal FROM meal_logs WHERE user_id = ? AND date BETWEEN ? AND ?")
@@ -339,8 +364,10 @@ export async function bodyMonthReport(
   }
 
   const round1 = (n: number | null): number | null => (n === null ? null : Math.round(n * 10) / 10);
-  const startTrend = round1(trendOf(weights, from));
-  const endTrend = round1(trendOf(weights, to));
+  const startAt = projectAt(weights, plan, from);
+  const endAt = projectAt(weights, plan, to);
+  const startTrend = round1(startAt.trend);
+  const endTrend = round1(endAt.trend);
   const gaining = plan.target_kg > plan.start_kg;
 
   // The best week is the one whose trend moved furthest toward the target; a week without both ends is skipped.
@@ -369,6 +396,11 @@ export async function bodyMonthReport(
     start_trend: startTrend,
     end_trend: endTrend,
     change_kg: startTrend === null || endTrend === null ? null : Math.round((endTrend - startTrend) * 10) / 10,
+    start_projected: startAt.projected_date,
+    end_projected: endAt.projected_date,
+    projected_shift_days: startAt.projected_date === null || endAt.projected_date === null
+      ? null
+      : dayNumber(endAt.projected_date) - dayNumber(startAt.projected_date),
     weigh_ins: weights.filter((w) => w.date >= from).length,
     workouts: workouts.length,
     minutes: workouts.reduce((s, o) => s + o.minutes, 0),
@@ -376,6 +408,21 @@ export async function bodyMonthReport(
     meals_logged: meals.filter((m) => m.description.trim()).length,
     best_week: best,
   };
+}
+
+/**
+ * The month of the earliest weigh-in, or null when there is none — how far back the Body page's
+ * 月度小结 card may be paged (PRD-body §13 item 11). The weigh-ins are what a month's headline number
+ * is made of, so a month before the first of them has nothing to report.
+ */
+export async function firstLogMonth(db: D1Database, userId: number): Promise<string | null> {
+  try {
+    const row = await db.prepare("SELECT MIN(date) AS first FROM weight_logs WHERE user_id = ?")
+      .bind(userId).first<{ first: string | null }>();
+    return row?.first ? row.first.slice(0, 7) : null;
+  } catch {
+    return null; // migration 0004 has not run here
+  }
 }
 
 // ---------- wording, shared by /body, the Guide and the web ----------

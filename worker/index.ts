@@ -24,7 +24,7 @@ import {
   deleteObservation, logObservation, provisionTracker, retireStream, streamById, tracker, trackers, updateStream,
 } from "./streams.ts";
 import { parseShape } from "./telegram/parse.ts";
-import { bodyMonthReport, bodySummary, detachBodyPlan, latestWeight, loadBodyPlan, loadMealLogs, loadWeightLogs, loadWorkoutLogs, refreshBodyGoalProgress, saveBodyPlan, suggestedWeightGoal, weightTrends } from "./body.ts";
+import { bodyMonthReport, bodySummary, detachBodyPlan, firstLogMonth, latestWeight, loadBodyPlan, loadMealLogs, loadWeightLogs, loadWorkoutLogs, refreshBodyGoalProgress, saveBodyPlan, suggestedWeightGoal, weightTrends } from "./body.ts";
 import { MAX_WORKOUT_MIN } from "./telegram/workout.ts";
 import { d1StateStore } from "./telegram/state.ts";
 import { userToday } from "./telegram/time.ts";
@@ -881,13 +881,15 @@ app.get("/api/body", async (c) => {
   const userId = c.get("userId");
   const today = await todayFor(c.env.DB, userId);
   const from = addDays(today, -(BODY_LOG_DAYS - 1));
-  const [summary, weights, meals, workouts, month] = await Promise.all([
+  const [summary, weights, meals, workouts, month, firstMonth] = await Promise.all([
     bodySummary(c.env.DB, userId, today),
     loadWeightLogs(c.env.DB, userId, from),
     loadMealLogs(c.env.DB, userId, from),
     loadWorkoutLogs(c.env.DB, userId, from),
     // The month so far (PRD-body §13 item 11): the same report the bot sends on the 1st.
     bodyMonthReport(c.env.DB, userId, today, today),
+    // How far back the page's month navigation may page.
+    firstLogMonth(c.env.DB, userId),
   ]);
   const trend = await weightTrends(c.env.DB, userId, weights.map((w) => w.date));
   return c.json({
@@ -899,8 +901,22 @@ app.get("/api/body", async (c) => {
     meals,
     workouts,
     month,
+    first_month: firstMonth,
     suggested: summary ? null : await suggestedWeightGoal(c.env.DB, userId),
   });
+});
+
+/**
+ * One earlier month for the Body page's 本月 card (PRD-body §13 item 11). The same bodyMonthReport
+ * the 1st-of-the-month message prints, so paging back on the page and scrolling back in the chat
+ * show the same numbers — and the same 7-day trends the chart draws.
+ */
+app.get("/api/body/month/:month", async (c) => {
+  const userId = c.get("userId");
+  const month = c.req.param("month");
+  if (!/^\d{4}-\d{2}$/.test(month)) return c.json({ error: "month must be YYYY-MM" }, 400);
+  const today = await todayFor(c.env.DB, userId);
+  return c.json({ month: await bodyMonthReport(c.env.DB, userId, `${month}-01`, today) });
 });
 
 /** Manual entry (PRD-body §10): one reading per local date, the latest wins, `unit` is input only. */

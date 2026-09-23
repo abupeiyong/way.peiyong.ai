@@ -16,6 +16,7 @@
     "check:meal": "node worker/telegram/meal.check.ts",
     "check:weight": "node worker/telegram/weight.check.ts",
     "check:adapt": "node worker/telegram/adapt.check.ts",
+    "check:month": "node worker/body.check.ts",
     "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.worker.json --noEmit",
     "check:parse": "node worker/telegram/parse.check.ts"
   },

@@ -402,6 +402,11 @@ textarea.input { resize: vertical; min-height: 64px; }
   transition: all 0.15s;
 }
 .day-nav button:hover { border-color: var(--red); color: var(--red-deep); background: var(--red-tint); }
+.day-nav button:disabled { opacity: 0.35; cursor: default; }
+/* Paging arrows sitting in a card heading (the Body page's 月度小结) stay out of the title's way. */
+.card-label .day-nav { align-self: center; }
+.card-label .day-nav button { width: 26px; height: 26px; }
+.day-nav button:disabled:hover { border-color: var(--line); color: var(--ink-soft); background: transparent; }
 
 .carry-banner {
   width: 100%;

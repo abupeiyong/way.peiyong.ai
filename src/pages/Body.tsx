@@ -21,6 +21,8 @@ interface Payload {
   suggested: string | null;
   /** The month so far — the same report the bot sends on the 1st (PRD-body §13 item 11). */
   month: BodyMonthReport | null;
+  /** YYYY-MM of the first weigh-in: how far back the 本月 card may be paged. */
+  first_month: string | null;
 }
 
 interface Point { date: string; kg: number; trend: number | null }
@@ -105,7 +107,9 @@ export default function Body() {
 
       {summary && <PlanCard summary={summary} onEdit={() => nav("/goals")} />}
 
-      {summary && data.month && <MonthCard report={data.month} />}
+      {summary && data.month && (
+        <MonthCard thisMonth={data.month} today={data.today} firstMonth={data.first_month} />
+      )}
 
       <div className="card" style={{ marginTop: 22 }}>
         <div className="card-label">
@@ -163,30 +167,88 @@ export default function Body() {
 
 const delta = (n: number) => `${n > 0 ? "+" : n < 0 ? "−" : ""}${Math.abs(n).toFixed(1)}`;
 
-/** 本月 · This month (PRD-body §13 item 11): the same numbers the monthly Telegram report prints. */
-function MonthCard({ report }: { report: BodyMonthReport }) {
-  const monthName = new Date(report.month + "-01T00:00:00").toLocaleDateString("en-US", { month: "long" });
+/** 2026-08 shifted by n months. */
+function shiftMonth(month: string, n: number): string {
+  const d = new Date(month + "-01T00:00:00Z");
+  d.setUTCMonth(d.getUTCMonth() + n);
+  return d.toISOString().slice(0, 7);
+}
+
+const monthName = (month: string) =>
+  new Date(month + "-01T00:00:00").toLocaleDateString("en-US", { month: "long", year: "numeric" });
+
+/** 「月初预计 → 现在预计」in days; "" when the shift cannot be stated. */
+function shiftText(days: number | null): string {
+  if (days === null) return "";
+  if (days === 0) return " · 没动 · unchanged";
+  return days < 0 ? ` · 提前 ${-days} 天 · ${-days} days earlier` : ` · 推后 ${days} 天 · ${days} days later`;
+}
+
+/**
+ * 月度小结 (PRD-body §13 item 11): the same BodyMonthReport the monthly Telegram message prints,
+ * with month navigation. The current month comes in with the page payload; an earlier one is one
+ * `GET /api/body/month/:month`, so the card never recomputes numbers of its own — the trend change
+ * it shows is the same 7-day trend the chart above draws.
+ */
+function MonthCard({ thisMonth, today, firstMonth }: { thisMonth: BodyMonthReport; today: string; firstMonth: string | null }) {
+  const current = today.slice(0, 7);
+  const [month, setMonth] = useState(current);
+  const [report, setReport] = useState<BodyMonthReport | null>(thisMonth);
+
+  useEffect(() => {
+    if (month === current) { setReport(thisMonth); return; }
+    let live = true;
+    setReport(null);
+    api.get<{ month: BodyMonthReport | null }>(`/api/body/month/${month}`)
+      .then((r) => { if (live) setReport(r.month); })
+      .catch(() => { if (live) setReport(null); });
+    return () => { live = false; };
+  }, [month, current, thisMonth]);
+
+  // Back to the first weigh-in's month, forward to the running one.
+  const canPrev = !firstMonth || shiftMonth(month, -1) >= firstMonth;
+  const canNext = month < current;
+
   return (
     <div className="card" style={{ marginTop: 18 }}>
-      <div className="card-label">本月 <i>{monthName}</i></div>
-      <div className="body-stats">
-        <div>
-          <div className="num">{report.change_kg === null ? "—" : `${delta(report.change_kg)} kg`}</div>
-          <div className="lbl">7 日均变化 · Trend change</div>
-        </div>
-        <div><div className="num">{report.weigh_ins}</div><div className="lbl">称重 · Weigh-ins</div></div>
-        <div><div className="num">{report.workouts}</div><div className="lbl">运动 · Workouts · {report.minutes} 分钟</div></div>
-        <div>
-          <div className="num">{report.kcal_avg === null ? "—" : `~${report.kcal_avg}`}</div>
-          <div className="lbl">平均 kcal · Daily average</div>
-        </div>
+      <div className="card-label">
+        {month === current ? "本月" : "月度小结"} <i>{monthName(month)}</i>
+        <span className="spacer" />
+        <span className="day-nav">
+          <button aria-label="上个月 · Previous month" disabled={!canPrev} onClick={() => setMonth(shiftMonth(month, -1))}><Icon name="left" /></button>
+          <button aria-label="下个月 · Next month" disabled={!canNext} onClick={() => setMonth(shiftMonth(month, 1))}><Icon name="right" /></button>
+        </span>
       </div>
-      <p className="hint">
-        {report.best_week
-          ? <>最好的一周 · best week {shortDate(report.best_week.week_start)} · {delta(report.best_week.change_kg)} kg · 运动 {report.best_week.workouts} 次</>
-          : <>称重多几次，就能看出最好的一周 · a few more weigh-ins and the best week shows up</>}
-        {report.meals_logged ? ` · 记录 ${report.meals_logged} 餐` : ""}
-      </p>
+      {!report
+        ? <p className="empty-note">这个月还没有身体记录 · Nothing logged this month.</p>
+        : <>
+          <div className="body-stats">
+            <div>
+              <div className="num">{report.change_kg === null ? "—" : `${delta(report.change_kg)} kg`}</div>
+              <div className="lbl">
+                7 日均变化 · Trend change
+                {report.start_trend !== null && report.end_trend !== null ? ` · ${kg1(report.start_trend)} → ${kg1(report.end_trend)}` : ""}
+              </div>
+            </div>
+            <div><div className="num">{report.weigh_ins}</div><div className="lbl">称重 · Weigh-ins</div></div>
+            <div><div className="num">{report.workouts}</div><div className="lbl">运动 · Workouts · {report.minutes} 分钟</div></div>
+            <div>
+              <div className="num">{report.kcal_avg === null ? "—" : `~${report.kcal_avg}`}</div>
+              <div className="lbl">平均 kcal · Daily average</div>
+            </div>
+          </div>
+          <p className="hint">
+            {report.best_week
+              ? <>最好的一周 · best week {shortDate(report.best_week.week_start)} · {delta(report.best_week.change_kg)} kg · 运动 {report.best_week.workouts} 次</>
+              : <>称重多几次，就能看出最好的一周 · a few more weigh-ins and the best week shows up</>}
+            {report.meals_logged ? ` · 记录 ${report.meals_logged} 餐` : ""}
+          </p>
+          <p className="hint">
+            {report.start_projected === null && report.end_projected === null
+              ? <>还算不出预计达成日 · no projected date yet</>
+              : <>预计达成 · projected {report.start_projected ?? "—"} → {report.end_projected ?? "—"}{shiftText(report.projected_shift_days)}</>}
+          </p>
+        </>}
     </div>
   );
 }

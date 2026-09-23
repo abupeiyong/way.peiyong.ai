@@ -29,6 +29,23 @@ function monthLabel(month: string): string {
   return `${Number(month.slice(5, 7))} 月 · ${name}`;
 }
 
+/**
+ * The projection then vs now: where the target date stood at the start of the window and where it
+ * stands at its end. Earlier is progress, later is slippage — the shift is stated in days so neither
+ * has to be read off two dates.
+ */
+function projectionText(r: BodyMonthReport): string {
+  if (r.start_projected === null && r.end_projected === null) return "还算不出预计达成日 · no projected date yet";
+  const shift = r.projected_shift_days === null
+    ? ""
+    : r.projected_shift_days === 0
+      ? "（没动 · unchanged）"
+      : r.projected_shift_days < 0
+        ? `（提前 ${-r.projected_shift_days} 天 · ${-r.projected_shift_days} days earlier）`
+        : `（推后 ${r.projected_shift_days} 天 · ${r.projected_shift_days} days later）`;
+  return `预计达成 · projected ${r.start_projected ?? "—"} → ${r.end_projected ?? "—"}${shift}`;
+}
+
 /** The report as it is printed in the chat and, minus the heading, summarised on the Body page. */
 export function bodyMonthBlock(r: BodyMonthReport, goalTitle: string): string {
   const weights = r.change_kg === null || r.start_trend === null || r.end_trend === null
@@ -44,6 +61,7 @@ export function bodyMonthBlock(r: BodyMonthReport, goalTitle: string): string {
     `  ${weights}`,
     `  运动 ${r.workouts} 次 · ${r.minutes} 分钟 · ${meals}`,
     `  ${best}`,
+    `  ${projectionText(r)}`,
   ].join("\n");
 }
 
