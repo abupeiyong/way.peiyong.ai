@@ -26,6 +26,7 @@ import {
 import { parseShape } from "./telegram/parse.ts";
 import { bodyMonthReport, bodySummary, detachBodyPlan, firstLogMonth, latestWeight, loadBodyPlan, loadMealLogs, loadWeightLogs, loadWorkoutLogs, refreshBodyGoalProgress, saveBodyPlan, suggestedWeightGoal, weightTrends } from "./body.ts";
 import { MAX_WORKOUT_MIN } from "./telegram/workout.ts";
+import { loadMeal, reanalyzeMeal } from "./telegram/meal.ts";
 import { d1StateStore } from "./telegram/state.ts";
 import { userToday } from "./telegram/time.ts";
 import { verifyWidgetLogin } from "./telegram/widget.ts";
@@ -44,6 +45,8 @@ export interface Env {
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL?: string;
   OPENAI_CHAT_MODEL?: string;
+  /** Set to read meal photos through the OpenAI-compatible endpoint (PRD-body §5.3, telegram/meal.ts). */
+  OPENAI_VISION_MODEL?: string;
   TELEGRAM_BOT_TOKEN?: string;
   /** The shared bot's @username, without the @. Unset = the login page shows no Telegram Login Widget. */
   TELEGRAM_BOT_USERNAME?: string;
@@ -976,6 +979,42 @@ app.delete("/api/body/meal/:id", async (c) => {
   await c.env.DB.prepare("DELETE FROM meal_logs WHERE id = ? AND user_id = ?")
     .bind(Number(c.req.param("id")), userId).run();
   return c.json({ ok: true });
+});
+
+/**
+ * Re-read a meal photo (PRD-body §13 item 12). Telegram keeps the file behind `meal_logs.tg_file_id`
+ * alive, so the picture can be read again by whatever vision model is configured now — nothing had to
+ * be stored for it. The same `reanalyzeMeal` the bot's `🔄 重新分析` button runs, so the two surfaces
+ * cannot disagree: numbers the user typed themselves are kept (`status: "user_edited"`, the row
+ * untouched), and a re-read counts against the day's ten analyses. `status` is always 200 with `note`
+ * saying what happened, because every outcome here is something to show the user, not a failed call.
+ */
+app.post("/api/body/meal/:id/reanalyze", async (c) => {
+  const userId = c.get("userId");
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "id must be a meal id" }, 400);
+  const row = await loadMeal(c.env.DB, userId, id);
+  if (!row) return c.json({ error: "meal not found" }, 404);
+  let bot: TelegramBot;
+  try {
+    bot = TelegramBot.fromEnv(c.env);
+  } catch {
+    // The photo only exists on Telegram, so without the token there is nothing to re-read.
+    return c.json({ error: "telegram is not configured here" }, 503);
+  }
+  const today = await todayFor(c.env.DB, userId);
+  const { status, row: meal, used, note } = await reanalyzeMeal({ db: c.env.DB, userId, today, guide: c.env, bot }, row);
+  return c.json({
+    status,
+    note: note ?? null,
+    /** The dishes whose numbers came from an earlier correction of the user's (PRD-body §13 item 12). */
+    dish_notes: used,
+    meal: {
+      id: meal.id, date: meal.date, time_min: meal.time_min, kind: meal.kind as MealKind,
+      description: meal.description, kcal: meal.kcal, protein_g: meal.protein_g,
+      user_edited: meal.user_edited, confidence: meal.confidence,
+    } satisfies MealLog,
+  });
 });
 
 /** Manual entry (PRD-body §10): activity and minutes, the same row the bot's `/workout` writes. */
